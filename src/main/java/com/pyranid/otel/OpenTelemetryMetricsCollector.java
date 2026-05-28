@@ -60,7 +60,7 @@ import static java.util.Objects.requireNonNull;
  * Pyranid core catches collector exceptions, but exporters that block can still stall the calling JDBC thread.
  *
  * @author <a href="https://www.revetkn.com">Mark Allen</a>
- * @since 4.2.0
+ * @since 1.0.0
  */
 @ThreadSafe
 public final class OpenTelemetryMetricsCollector implements MetricsCollector {
@@ -119,7 +119,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		UNKNOWN_OPERATION = "UNKNOWN";
 		OUTCOME_SUCCESS = "success";
 		OUTCOME_FAILURE = "failure";
-		OPERATION_PATTERN = Pattern.compile("^\\s*([A-Za-z]+)");
+		OPERATION_PATTERN = Pattern.compile("(?is)^\\s*(?:(?:(?:/\\*.*?\\*/)|(?:--[^\\n]*(?:\\n|$)))\\s*)*([A-Za-z]+)");
 		INSERT_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*insert\\s+into\\s+([^\\s(]+)");
 		UPDATE_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*update\\s+([^\\s(]+)");
 		DELETE_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*delete\\s+from\\s+([^\\s(]+)");
@@ -360,7 +360,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 			return;
 
 		requireNonNull(ctx);
-		recordConnectionWaitTime(ctx.getDatabaseType(), acquisitionDuration, requireNonNull(throwable));
+		recordConnectionWaitTime(DatabaseType.GENERIC, acquisitionDuration, requireNonNull(throwable));
 	}
 
 	@Override
@@ -535,7 +535,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(statementLog);
 		requireNonNull(throwable);
 
-		Attributes attributes = statementAttributes(ctx, throwable);
+		Attributes attributes = statementAttributes(ctx, throwable, statementConnectionAcquisitionFailed(throwable) ? DatabaseType.GENERIC : null);
 		this.operationDurationHistogram.record(seconds(statementLog.getTotalDuration()), attributes);
 		recordStatementComponentDurations(statementLog, attributes);
 		this.statementErrorsCounter.add(1, attributes);
@@ -550,7 +550,6 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 		Attributes attributes = streamAttributes(ctx.getDatabaseType(), StreamTerminalOutcome.OPEN_FAILURE);
 		this.streamDurationHistogram.record(seconds(openDuration), attributes);
-		this.streamRowsConsumedHistogram.record(0L, attributes);
 	}
 
 	@Override
@@ -594,10 +593,17 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	@NonNull
 	private Attributes statementAttributes(@NonNull StatementContext<?> ctx,
 																				 @Nullable Throwable throwable) {
+		return statementAttributes(ctx, throwable, null);
+	}
+
+	@NonNull
+	private Attributes statementAttributes(@NonNull StatementContext<?> ctx,
+																				 @Nullable Throwable throwable,
+																				 @Nullable DatabaseType databaseTypeOverride) {
 		requireNonNull(ctx);
 
 		AttributesBuilder builder = Attributes.builder()
-				.putAll(databaseAttributes(ctx.getDatabaseType()))
+				.putAll(databaseAttributes(databaseTypeOverride == null ? ctx.getDatabaseType() : databaseTypeOverride))
 				.put(DB_OPERATION_NAME_ATTRIBUTE_KEY, operationNameFor(ctx));
 
 		if (this.namespace != null)
@@ -617,6 +623,11 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
 
 		return builder.build();
+	}
+
+	private static boolean statementConnectionAcquisitionFailed(@NonNull Throwable throwable) {
+		requireNonNull(throwable);
+		return throwable instanceof DatabaseException && "Unable to acquire database connection".equals(throwable.getMessage());
 	}
 
 	@NonNull

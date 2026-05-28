@@ -17,6 +17,6 @@
 /**
  * OpenTelemetry metrics support for Pyranid.
  *
- * @since 4.2.0
+ * @since 1.0.0
  */
 package com.pyranid.otel;

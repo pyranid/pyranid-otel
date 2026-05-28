@@ -32,6 +32,8 @@ Database database = Database.withDataSource(dataSource)
 
 `poolName(null)` or leaving it unset skips pool-name-gated connection metrics. `namespace(null)` omits `db.namespace`; no JDBC metadata lookup is performed by the builder. `recordCollectionName(false)` is the default and avoids table-name cardinality unless you opt in.
 
+When `recordCollectionName(true)` is enabled, `db.collection.name` is extracted with a lightweight SQL heuristic, not a full SQL parser. It works best for simple single-table `SELECT`, `INSERT`, `UPDATE`, and `DELETE` statements. Multi-table joins, CTEs, subqueries, aliases, schema-qualified names, and generated SQL may produce an incomplete or surprising collection name. Leading block and line comments are skipped before detecting `db.operation.name`.
+
 ## Metrics
 
 Stable OpenTelemetry semantic-convention metric:
@@ -65,6 +67,18 @@ Pyranid-specific metrics:
 
 Pyranid does not synthesize pool-internal metrics such as idle counts, max connections, pending requests, timeouts, or create time. Those belong to the connection pool or proxy.
 
+## Attribute Notes
+
+`db.system.name` is mapped from Pyranid's configured or detected database type:
+
+| Pyranid `DatabaseType` | `db.system.name` |
+| --- | --- |
+| `POSTGRESQL` | `postgresql` |
+| `ORACLE` | `oracle.db` |
+| `GENERIC` | `other_sql` |
+
+`db.operation.name` is the first SQL verb after leading SQL comments, uppercased. This adapter does not parse or normalize full SQL grammar.
+
 ## Compatibility
 
 This module pins OpenTelemetry Java BOM `1.61.0`, chosen at implementation time for Pyranid `4.2.0-SNAPSHOT`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
@@ -75,6 +89,8 @@ No JPMS module metadata is declared in `1.0.0-SNAPSHOT`.
 
 `OpenTelemetryMetricsCollector.snapshot()` returns `Optional.empty()` because metrics are read through the OTel SDK/exporter pipeline.
 
-`Statement.id` from `Query.id(...)` is not emitted as a default metric attribute. It is user-controlled and can be high-cardinality; custom collectors can still read it from `StatementContext`.
+This adapter does not emit `Statement.id`, full SQL text, `db.query.text`, trace/span data, or arbitrary query parameters. Those values are user-controlled or high-cardinality and belong in tracing or custom instrumentation when needed. Custom collectors can still read the full `StatementContext`.
 
 `db.client.connection.use_time` measures connection hold time, not exact physical transaction lifetime. It includes transaction setup and cleanup around the commit/rollback operation.
+
+`pyranid.transaction.active` increments when a physical JDBC transaction begins and decrements once at the terminal physical transaction outcome. Commit failure is not terminal by itself because Pyranid attempts rollback afterward; the rollback callback owns the single decrement.
