@@ -1,0 +1,355 @@
+/*
+ * Copyright 2026 Revetware LLC.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.pyranid.otel;
+
+import com.pyranid.Database;
+import com.pyranid.DatabaseException;
+import com.pyranid.DatabaseType;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.data.HistogramPointData;
+import io.opentelemetry.sdk.metrics.data.LongPointData;
+import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
+import org.hsqldb.jdbc.JDBCDataSource;
+import org.jspecify.annotations.NonNull;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import javax.annotation.concurrent.ThreadSafe;
+import javax.sql.DataSource;
+import java.io.PrintWriter;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
+
+import static java.lang.String.format;
+
+/**
+ * @author <a href="https://www.revetkn.com">Mark Allen</a>
+ * @since 4.2.0
+ */
+@ThreadSafe
+public class OpenTelemetryMetricsCollectorTests {
+	private static final AttributeKey<String> DB_SYSTEM_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.system.name");
+	private static final AttributeKey<String> DB_OPERATION_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.operation.name");
+	private static final AttributeKey<String> DB_NAMESPACE_ATTRIBUTE_KEY = AttributeKey.stringKey("db.namespace");
+	private static final AttributeKey<String> DB_COLLECTION_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.collection.name");
+	private static final AttributeKey<String> DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.client.connection.pool.name");
+	private static final AttributeKey<String> TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.closure_outcome");
+	private static final AttributeKey<String> TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.commit_outcome");
+	private static final AttributeKey<String> TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.rollback_outcome");
+	private static final AttributeKey<String> STREAM_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.stream.outcome");
+
+	@Test
+	public void recordsStatementResponseAndPoolMetrics() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-statements"))
+				.poolName("primary")
+				.namespace("app")
+				.recordCollectionName(true)
+				.build();
+		Database database = database("otel_statements", collector);
+
+		database.query("CREATE TABLE widgets (id INT)").execute();
+		database.query("INSERT INTO widgets VALUES (1)").execute();
+		List<Integer> ids = database.query("SELECT id FROM widgets").fetchList(Integer.class);
+
+		Assertions.assertEquals(List.of(1), ids);
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(1L, histogramCount(metrics, "db.client.operation.duration",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))
+						&& "SELECT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))
+						&& "app".equals(attributes.get(DB_NAMESPACE_ATTRIBUTE_KEY))
+						&& "widgets".equals(attributes.get(DB_COLLECTION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "db.client.response.returned_rows",
+				attributes -> "SELECT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))
+						&& "widgets".equals(attributes.get(DB_COLLECTION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.statement.rows_affected",
+				attributes -> "INSERT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(3L, histogramTotalCount(metrics, "db.client.connection.wait_time",
+				attributes -> "primary".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(3L, histogramTotalCount(metrics, "db.client.connection.use_time",
+				attributes -> "primary".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void omitsPoolMetricsWhenPoolNameIsUnset() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-no-pool"))
+				.build();
+		Database database = database("otel_no_pool", collector);
+
+		database.query("CREATE TABLE t (id INT)").execute();
+		database.query("INSERT INTO t VALUES (1)").execute();
+
+		Set<String> metricNames = harness.metricReader().collectAllMetrics().stream()
+				.map(MetricData::getName)
+				.collect(Collectors.toSet());
+
+		Assertions.assertFalse(metricNames.contains("db.client.connection.wait_time"));
+		Assertions.assertFalse(metricNames.contains("db.client.connection.use_time"));
+	}
+
+	@Test
+	public void recordsTransactionMetricsAndActiveGaugeReturnsToZero() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-transactions"))
+				.build();
+		Database database = database("otel_transactions", collector);
+
+		database.query("CREATE TABLE t (id INT)").execute();
+		database.transaction(() -> database.query("INSERT INTO t VALUES (1)").execute());
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(0L, longSumValue(metrics, "pyranid.transaction.active",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.commit.duration",
+				attributes -> "success".equals(attributes.get(TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.count",
+				attributes -> "committed".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void activeGaugeReturnsToZeroAfterCommitFailureAndRollbackSuccess() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-commit-failure"))
+				.build();
+		AtomicInteger rollbacks = new AtomicInteger();
+		Database database = Database.withDataSource(commitFailingDataSource("otel_commit_failure", rollbacks))
+				.databaseType(DatabaseType.POSTGRESQL)
+				.metricsCollector(collector)
+				.build();
+
+		database.query("CREATE TABLE t (id INT)").execute();
+
+		Assertions.assertThrows(DatabaseException.class, () -> database.transaction(() ->
+				database.query("INSERT INTO t VALUES (1)").execute()));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(1, rollbacks.get());
+		Assertions.assertEquals(0L, longSumValue(metrics, "pyranid.transaction.active",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.commit.duration",
+				attributes -> "failure".equals(attributes.get(TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.rollback.duration",
+				attributes -> "success".equals(attributes.get(TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.count",
+				attributes -> "rolled_back".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void recordsStreamTerminalOutcomeAfterCallbackCompletes() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-streams"))
+				.build();
+		Database database = database("otel_streams", collector);
+
+		database.query("CREATE TABLE t (id INT)").execute();
+		database.query("INSERT INTO t VALUES (1)").execute();
+		database.query("INSERT INTO t VALUES (2)").execute();
+		List<Integer> rows = database.query("SELECT id FROM t ORDER BY id")
+				.fetchStream(Integer.class, stream -> stream.limit(1).collect(Collectors.toList()));
+
+		Assertions.assertEquals(List.of(1), rows);
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.fetchstream.duration",
+				attributes -> "early_close".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.fetchstream.rows_consumed",
+				attributes -> "early_close".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@NonNull
+	private static Database database(@NonNull String name,
+																	 @NonNull OpenTelemetryMetricsCollector collector) {
+		return Database.withDataSource(createInMemoryDataSource(name))
+				.databaseType(DatabaseType.POSTGRESQL)
+				.metricsCollector(collector)
+				.build();
+	}
+
+	@NonNull
+	private static DataSource createInMemoryDataSource(@NonNull String databaseName) {
+		JDBCDataSource dataSource = new JDBCDataSource();
+		dataSource.setUrl(format("jdbc:hsqldb:mem:%s;sql.syntax_pgs=true", databaseName));
+		dataSource.setUser("SA");
+		return dataSource;
+	}
+
+	@NonNull
+	private static DataSource commitFailingDataSource(@NonNull String databaseName,
+																										@NonNull AtomicInteger rollbacks) {
+		return new WrappingDataSource(createInMemoryDataSource(databaseName), connection ->
+				(Connection) Proxy.newProxyInstance(
+						Connection.class.getClassLoader(),
+						new Class<?>[]{Connection.class},
+						(proxy, method, args) -> {
+							if ("commit".equals(method.getName()))
+								throw new SQLException("commit failed", "40001");
+
+							if ("rollback".equals(method.getName()) && (args == null || args.length == 0))
+								rollbacks.incrementAndGet();
+
+							try {
+								return method.invoke(connection, args);
+							} catch (InvocationTargetException e) {
+								throw e.getCause();
+							}
+						}));
+	}
+
+	private static long longSumValue(Collection<MetricData> metrics,
+																	 String metricName,
+																	 java.util.function.Predicate<Attributes> attributesMatcher) {
+		return metricByName(metrics, metricName).getLongSumData().getPoints().stream()
+				.filter(point -> attributesMatcher.test(point.getAttributes()))
+				.mapToLong(LongPointData::getValue)
+				.findFirst()
+				.orElseThrow();
+	}
+
+	private static long histogramCount(Collection<MetricData> metrics,
+																	 String metricName,
+																	 java.util.function.Predicate<Attributes> attributesMatcher) {
+		return metricByName(metrics, metricName).getHistogramData().getPoints().stream()
+				.filter(point -> attributesMatcher.test(point.getAttributes()))
+				.mapToLong(HistogramPointData::getCount)
+				.findFirst()
+				.orElseThrow();
+	}
+
+	private static long histogramTotalCount(Collection<MetricData> metrics,
+																					String metricName,
+																					java.util.function.Predicate<Attributes> attributesMatcher) {
+		return metricByName(metrics, metricName).getHistogramData().getPoints().stream()
+				.filter(point -> attributesMatcher.test(point.getAttributes()))
+				.mapToLong(HistogramPointData::getCount)
+				.sum();
+	}
+
+	private static MetricData metricByName(Collection<MetricData> metrics,
+																				 String metricName) {
+		return metrics.stream()
+				.filter(metric -> metricName.equals(metric.getName()))
+				.findFirst()
+				.orElseThrow();
+	}
+
+	private record TestHarness(@NonNull InMemoryMetricReader metricReader,
+														 @NonNull OpenTelemetrySdk openTelemetrySdk,
+														 @NonNull SdkMeterProvider sdkMeterProvider) {
+		@NonNull
+		static TestHarness create() {
+			InMemoryMetricReader metricReader = InMemoryMetricReader.create();
+			SdkMeterProvider sdkMeterProvider = SdkMeterProvider.builder()
+					.registerMetricReader(metricReader)
+					.build();
+			OpenTelemetrySdk openTelemetrySdk = OpenTelemetrySdk.builder()
+					.setMeterProvider(sdkMeterProvider)
+					.build();
+
+			return new TestHarness(metricReader, openTelemetrySdk, sdkMeterProvider);
+		}
+	}
+
+	@FunctionalInterface
+	private interface ConnectionWrapper {
+		@NonNull
+		Connection wrap(@NonNull Connection connection) throws SQLException;
+	}
+
+	private static final class WrappingDataSource implements DataSource {
+		@NonNull
+		private final DataSource delegate;
+		@NonNull
+		private final ConnectionWrapper connectionWrapper;
+
+		private WrappingDataSource(@NonNull DataSource delegate,
+															 @NonNull ConnectionWrapper connectionWrapper) {
+			this.delegate = delegate;
+			this.connectionWrapper = connectionWrapper;
+		}
+
+		@Override
+		public Connection getConnection() throws SQLException {
+			return this.connectionWrapper.wrap(this.delegate.getConnection());
+		}
+
+		@Override
+		public Connection getConnection(String username,
+																		String password) throws SQLException {
+			return this.connectionWrapper.wrap(this.delegate.getConnection(username, password));
+		}
+
+		@Override
+		public PrintWriter getLogWriter() throws SQLException {
+			return this.delegate.getLogWriter();
+		}
+
+		@Override
+		public void setLogWriter(PrintWriter out) throws SQLException {
+			this.delegate.setLogWriter(out);
+		}
+
+		@Override
+		public void setLoginTimeout(int seconds) throws SQLException {
+			this.delegate.setLoginTimeout(seconds);
+		}
+
+		@Override
+		public int getLoginTimeout() throws SQLException {
+			return this.delegate.getLoginTimeout();
+		}
+
+		@Override
+		public Logger getParentLogger() throws SQLFeatureNotSupportedException {
+			return this.delegate.getParentLogger();
+		}
+
+		@Override
+		public <T> T unwrap(Class<T> iface) throws SQLException {
+			return this.delegate.unwrap(iface);
+		}
+
+		@Override
+		public boolean isWrapperFor(Class<?> iface) throws SQLException {
+			return this.delegate.isWrapperFor(iface);
+		}
+	}
+}
