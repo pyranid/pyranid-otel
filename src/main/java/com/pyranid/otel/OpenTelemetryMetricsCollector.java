@@ -45,6 +45,8 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -174,6 +176,8 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private final LongCounter transactionCountCounter;
 	@NonNull
 	private final LongUpDownCounter activeTransactionsCounter;
+	@NonNull
+	private final Set<Transaction> activeTransactions;
 	@NonNull
 	private final LongCounter savepointOperationsCounter;
 	@NonNull
@@ -323,6 +327,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 				.setDescription("Number of active physical JDBC transactions.")
 				.setUnit("{transaction}")
 				.build();
+		this.activeTransactions = ConcurrentHashMap.newKeySet();
 		this.savepointOperationsCounter = meter.counterBuilder("pyranid.savepoint.operations")
 				.setDescription("Total number of savepoint operations.")
 				.setUnit("{operation}")
@@ -430,7 +435,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	public void didBeginPhysicalTransaction(@NonNull Transaction transaction,
 																					@NonNull TransactionIsolation isolation,
 																					@NonNull DatabaseType databaseType) {
-		this.activeTransactionsCounter.add(1, databaseAttributes(databaseType));
+		markPhysicalTransactionActive(transaction, databaseType);
 	}
 
 	@Override
@@ -453,7 +458,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 																					 @NonNull Duration physicalDuration) {
 		this.transactionCommitDurationHistogram.record(seconds(physicalDuration),
 				transactionOperationAttributes(databaseType, transaction.getTransactionIsolation(), TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY, OUTCOME_SUCCESS, null));
-		this.activeTransactionsCounter.add(-1, databaseAttributes(databaseType));
+		markPhysicalTransactionInactive(transaction, databaseType);
 	}
 
 	@Override
@@ -473,7 +478,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 																						@NonNull Duration physicalDuration) {
 		this.transactionRollbackDurationHistogram.record(seconds(physicalDuration),
 				transactionOperationAttributes(databaseType, transaction.getTransactionIsolation(), TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY, OUTCOME_SUCCESS, null));
-		this.activeTransactionsCounter.add(-1, databaseAttributes(databaseType));
+		markPhysicalTransactionInactive(transaction, databaseType);
 	}
 
 	@Override
@@ -483,7 +488,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 																									 @NonNull Throwable throwable) {
 		this.transactionRollbackDurationHistogram.record(seconds(physicalDuration),
 				transactionOperationAttributes(databaseType, transaction.getTransactionIsolation(), TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY, OUTCOME_FAILURE, throwable));
-		this.activeTransactionsCounter.add(-1, databaseAttributes(databaseType));
+		markPhysicalTransactionInactive(transaction, databaseType);
 	}
 
 	@Override
@@ -634,6 +639,24 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private Attributes databaseAttributes(@NonNull DatabaseType databaseType) {
 		requireNonNull(databaseType);
 		return Attributes.of(DB_SYSTEM_NAME_ATTRIBUTE_KEY, dbSystemName(databaseType));
+	}
+
+	private void markPhysicalTransactionActive(@NonNull Transaction transaction,
+																						 @NonNull DatabaseType databaseType) {
+		requireNonNull(transaction);
+		requireNonNull(databaseType);
+
+		if (this.activeTransactions.add(transaction))
+			this.activeTransactionsCounter.add(1, databaseAttributes(databaseType));
+	}
+
+	private void markPhysicalTransactionInactive(@NonNull Transaction transaction,
+																							 @NonNull DatabaseType databaseType) {
+		requireNonNull(transaction);
+		requireNonNull(databaseType);
+
+		if (this.activeTransactions.remove(transaction))
+			this.activeTransactionsCounter.add(-1, databaseAttributes(databaseType));
 	}
 
 	@NonNull

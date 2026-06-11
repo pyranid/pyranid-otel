@@ -110,4 +110,4 @@ This adapter does not emit `Statement.id`, full SQL text, `db.query.text`, trace
 
 `db.client.connection.use_time` measures connection hold time, not exact physical transaction lifetime. It includes transaction setup and cleanup around the commit/rollback operation.
 
-`pyranid.transaction.active` increments when a physical JDBC transaction begins and decrements once at the terminal physical transaction outcome. Commit failure is not terminal by itself because Pyranid attempts rollback afterward; the rollback callback owns the single decrement.
+`pyranid.transaction.active` increments when a physical JDBC transaction begins and decrements once at the terminal physical transaction outcome. Commit failure is not terminal by itself because Pyranid attempts rollback afterward; the rollback callback owns the single decrement. Physical-begin failures do not decrement unless the transaction was first recorded as active.

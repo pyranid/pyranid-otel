@@ -196,6 +196,34 @@ public class OpenTelemetryMetricsCollectorTests {
 	}
 
 	@Test
+	public void activeGaugeDoesNotGoNegativeWhenPhysicalBeginFailsBeforeBeginCallback() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-begin-failure-active"))
+				.build();
+		AtomicInteger rollbacks = new AtomicInteger();
+		Database database = Database.withDataSource(beginFailingDataSource("otel_begin_failure_active", rollbacks))
+				.databaseType(DatabaseType.POSTGRESQL)
+				.metricsCollector(collector)
+				.build();
+
+		database.query("CREATE TABLE t (id INT)").execute();
+
+		Assertions.assertThrows(DatabaseException.class, () -> database.transaction(TransactionIsolation.SERIALIZABLE, () ->
+				database.query("INSERT INTO t VALUES (1)").execute()));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(1, rollbacks.get());
+		Assertions.assertEquals(0L, longSumValueOrZero(metrics, "pyranid.transaction.active",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.physical.begin_failures",
+				attributes -> "set_isolation".equals(attributes.get(TRANSACTION_BEGIN_PHASE_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.rollback.duration",
+				attributes -> "success".equals(attributes.get(TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
 	public void recordsStreamTerminalOutcomeAfterCallbackCompletes() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
@@ -327,6 +355,28 @@ public class OpenTelemetryMetricsCollectorTests {
 						}));
 	}
 
+	@NonNull
+	private static DataSource beginFailingDataSource(@NonNull String databaseName,
+																									 @NonNull AtomicInteger rollbacks) {
+		return new WrappingDataSource(createInMemoryDataSource(databaseName), connection ->
+				(Connection) Proxy.newProxyInstance(
+						Connection.class.getClassLoader(),
+						new Class<?>[]{Connection.class},
+						(proxy, method, args) -> {
+							if ("setTransactionIsolation".equals(method.getName()))
+								throw new SQLException("set isolation failed", "08000");
+
+							if ("rollback".equals(method.getName()) && (args == null || args.length == 0))
+								rollbacks.incrementAndGet();
+
+							try {
+								return method.invoke(connection, args);
+							} catch (InvocationTargetException e) {
+								throw e.getCause();
+							}
+						}));
+	}
+
 	private static long longSumValue(Collection<MetricData> metrics,
 																	 String metricName,
 																	 java.util.function.Predicate<Attributes> attributesMatcher) {
@@ -335,6 +385,19 @@ public class OpenTelemetryMetricsCollectorTests {
 				.mapToLong(LongPointData::getValue)
 				.findFirst()
 				.orElseThrow();
+	}
+
+	private static long longSumValueOrZero(Collection<MetricData> metrics,
+																				 String metricName,
+																				 java.util.function.Predicate<Attributes> attributesMatcher) {
+		return metrics.stream()
+				.filter(metric -> metricName.equals(metric.getName()))
+				.findFirst()
+				.map(metric -> metric.getLongSumData().getPoints().stream()
+						.filter(point -> attributesMatcher.test(point.getAttributes()))
+						.mapToLong(LongPointData::getValue)
+						.sum())
+				.orElse(0L);
 	}
 
 	private static long histogramCount(Collection<MetricData> metrics,
