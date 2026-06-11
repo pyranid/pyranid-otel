@@ -79,11 +79,28 @@ Pyranid does not synthesize pool-internal metrics such as idle counts, max conne
 
 `db.operation.name` is the first SQL verb after leading SQL comments, uppercased. This adapter does not parse or normalize full SQL grammar.
 
+## Development Verification
+
+From the `pyranid-otel/` project directory, run:
+
+```bash
+mvn -q verify
+mvn -q javadoc:javadoc
+```
+
+When building against an unpublished Pyranid snapshot, install the matching `pyranid/` checkout locally first:
+
+```bash
+mvn -q -f ../pyranid/pom.xml -DskipTests install
+```
+
+Artifact signing and Maven Central publishing are isolated in the `release` profile. Use `mvn -P release deploy` only when publishing a release or snapshot; normal local and CI `verify` runs do not require GPG credentials.
+
 ## Compatibility
 
 This module pins OpenTelemetry Java BOM `1.61.0`, chosen at implementation time for Pyranid `4.2.0-SNAPSHOT`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
 
-No JPMS module metadata is declared in `1.0.0-SNAPSHOT`.
+The jar declares the automatic JPMS module name `com.pyranid.otel`.
 
 ## Notes
 
