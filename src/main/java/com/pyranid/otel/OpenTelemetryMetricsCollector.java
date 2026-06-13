@@ -359,13 +359,15 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@Override
 	public void didFailToAcquireStatementConnection(@NonNull StatementContext<?> ctx,
+																									@NonNull DatabaseType databaseType,
 																									@NonNull Duration acquisitionDuration,
 																									@NonNull Throwable throwable) {
 		if (this.poolName == null)
 			return;
 
 		requireNonNull(ctx);
-		recordConnectionWaitTime(DatabaseType.GENERIC, acquisitionDuration, requireNonNull(throwable));
+		requireNonNull(databaseType);
+		recordConnectionWaitTime(databaseType, acquisitionDuration, requireNonNull(throwable));
 	}
 
 	@Override
@@ -535,12 +537,14 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	@Override
 	public void didFailToExecuteStatement(@NonNull StatementContext<?> ctx,
 																				@NonNull StatementLog<?> statementLog,
+																				@NonNull DatabaseType databaseType,
 																				@NonNull Throwable throwable) {
 		requireNonNull(ctx);
 		requireNonNull(statementLog);
+		requireNonNull(databaseType);
 		requireNonNull(throwable);
 
-		Attributes attributes = statementAttributes(ctx, throwable, statementConnectionAcquisitionFailed(throwable) ? DatabaseType.GENERIC : null);
+		Attributes attributes = statementAttributes(ctx, throwable, databaseType);
 		this.operationDurationHistogram.record(seconds(statementLog.getTotalDuration()), attributes);
 		recordStatementComponentDurations(statementLog, attributes);
 		this.statementErrorsCounter.add(1, attributes);
@@ -548,12 +552,14 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@Override
 	public void didFailToOpenStream(@NonNull StatementContext<?> ctx,
+																	@NonNull DatabaseType databaseType,
 																	@NonNull Duration openDuration,
 																	@NonNull Throwable throwable) {
 		requireNonNull(ctx);
+		requireNonNull(databaseType);
 		requireNonNull(throwable);
 
-		Attributes attributes = streamAttributes(ctx.getDatabaseType(), StreamTerminalOutcome.OPEN_FAILURE);
+		Attributes attributes = streamAttributes(databaseType, StreamTerminalOutcome.OPEN_FAILURE);
 		this.streamDurationHistogram.record(seconds(openDuration), attributes);
 	}
 
@@ -628,11 +634,6 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
 
 		return builder.build();
-	}
-
-	private static boolean statementConnectionAcquisitionFailed(@NonNull Throwable throwable) {
-		requireNonNull(throwable);
-		return throwable instanceof DatabaseException && "Unable to acquire database connection".equals(throwable.getMessage());
 	}
 
 	@NonNull

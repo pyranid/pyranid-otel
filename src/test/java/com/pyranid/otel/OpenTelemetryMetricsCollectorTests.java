@@ -145,6 +145,39 @@ public class OpenTelemetryMetricsCollectorTests {
 	}
 
 	@Test
+	public void failedStatementConnectionAcquireUsesConfiguredDatabaseType() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-failed-acquire-database-type"))
+				.poolName("primary")
+				.build();
+		CountingFailingDataSource dataSource = new CountingFailingDataSource();
+		Database database = Database.withDataSource(dataSource)
+				.databaseType(DatabaseType.POSTGRESQL)
+				.metricsCollector(collector)
+				.build();
+
+		Assertions.assertThrows(DatabaseException.class, () -> database.query("SELECT 1").execute());
+		Assertions.assertEquals(1, dataSource.connectionAttempts());
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+
+		Assertions.assertEquals(1L, histogramTotalCount(metrics, "db.client.connection.wait_time",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))
+						&& "primary".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(0L, histogramTotalCountOrZero(metrics, "db.client.connection.wait_time",
+				attributes -> "other_sql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "db.client.operation.duration",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))
+						&& "SELECT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.statement.errors",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))
+						&& "SELECT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(0L, longSumValueOrZero(metrics, "pyranid.statement.errors",
+				attributes -> "other_sql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
 	public void recordsTransactionMetricsAndActiveGaugeReturnsToZero() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
@@ -192,7 +225,7 @@ public class OpenTelemetryMetricsCollectorTests {
 		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.rollback.duration",
 				attributes -> "success".equals(attributes.get(TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.count",
-				attributes -> "rolled_back".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
+				attributes -> "failed".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
 	}
 
 	@Test
