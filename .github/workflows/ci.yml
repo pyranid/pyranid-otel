@@ -5,11 +5,6 @@ on:
     branches: [master, develop, 'feature/**']
   pull_request:
   workflow_dispatch:
-    inputs:
-      pyranid_ref:
-        description: Pyranid repository ref to install before building pyranid-otel
-        required: false
-        default: master
 
 # Cancel superseded runs on the same ref to save time and reduce noise.
 concurrency:
@@ -26,17 +21,8 @@ jobs:
       matrix:
         jdk: ['17', '21', '25']
     steps:
-      - name: Check out pyranid-otel
+      - name: Check out
         uses: actions/checkout@v6
-        with:
-          path: pyranid-otel
-
-      - name: Check out pyranid
-        uses: actions/checkout@v6
-        with:
-          repository: pyranid/pyranid
-          ref: ${{ inputs.pyranid_ref || 'master' }}
-          path: pyranid
 
       - name: Set up JDK ${{ matrix.jdk }}
         uses: actions/setup-java@v5
@@ -45,11 +31,8 @@ jobs:
           java-version: ${{ matrix.jdk }}
           cache: maven
 
-      - name: Install Pyranid snapshot
-        run: mvn -B -ntp -f pyranid/pom.xml -DskipTests install
-
       - name: Verify
-        run: mvn -B -ntp -f pyranid-otel/pom.xml verify
+        run: mvn -B -ntp verify
 
       - name: Build Javadoc
-        run: mvn -B -ntp -f pyranid-otel/pom.xml javadoc:javadoc
+        run: mvn -B -ntp javadoc:javadoc

@@ -22,6 +22,7 @@ import com.pyranid.DatabaseType;
 import com.pyranid.MetricsCollector;
 import com.pyranid.Transaction;
 import com.pyranid.TransactionIsolation;
+import com.pyranid.TransactionOptions;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -242,8 +243,9 @@ public class OpenTelemetryMetricsCollectorTests {
 
 		database.query("CREATE TABLE t (id INT)").execute();
 
-		Assertions.assertThrows(DatabaseException.class, () -> database.transaction(TransactionIsolation.SERIALIZABLE, () ->
-				database.query("INSERT INTO t VALUES (1)").execute()));
+		Assertions.assertThrows(DatabaseException.class, () -> database.transaction(
+				TransactionOptions.withIsolation(TransactionIsolation.SERIALIZABLE).build(), () ->
+					database.query("INSERT INTO t VALUES (1)").execute()));
 
 		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
 

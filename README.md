@@ -8,7 +8,7 @@ OpenTelemetry metrics integration for [Pyranid](https://www.pyranid.com).
 <dependency>
   <groupId>com.pyranid</groupId>
   <artifactId>pyranid-otel</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
 </dependency>
 ```
 
@@ -88,17 +88,11 @@ mvn -q verify
 mvn -q javadoc:javadoc
 ```
 
-When building against an unpublished Pyranid snapshot, install the matching `pyranid/` checkout locally first:
-
-```bash
-mvn -q -f ../pyranid/pom.xml -DskipTests install
-```
-
 Artifact signing and Maven Central publishing are isolated in the `release` profile. Use `mvn -P release deploy` only when publishing a release or snapshot; normal local and CI `verify` runs do not require GPG credentials.
 
 ## Compatibility
 
-This module pins OpenTelemetry Java BOM `1.61.0`, chosen at implementation time for Pyranid `4.2.0-SNAPSHOT`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
+This module pins OpenTelemetry Java BOM `1.61.0`, chosen at implementation time for Pyranid `4.2.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
 
 The jar declares the automatic JPMS module name `com.pyranid.otel`.
 

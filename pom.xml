@@ -6,7 +6,7 @@
 
 	<groupId>com.pyranid</groupId>
 	<artifactId>pyranid-otel</artifactId>
-	<version>1.0.0-SNAPSHOT</version>
+	<version>1.0.0</version>
 	<packaging>jar</packaging>
 	<name>Pyranid OpenTelemetry Integration</name>
 	<description>OpenTelemetry metrics integration for Pyranid.</description>
@@ -52,7 +52,7 @@
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 		<project.build.outputTimestamp>2026-05-09T00:00:00Z</project.build.outputTimestamp>
-		<pyranid.version>4.2.0-SNAPSHOT</pyranid.version>
+		<pyranid.version>4.2.0</pyranid.version>
 		<opentelemetry.version>1.61.0</opentelemetry.version>
 		<junit.version>5.13.3</junit.version>
 		<hsqldb.version>2.7.4</hsqldb.version>
