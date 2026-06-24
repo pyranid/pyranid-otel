@@ -73,6 +73,27 @@ public class OpenTelemetryMetricsCollectorTests {
 	private static final AttributeKey<String> STREAM_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.stream.outcome");
 
 	@Test
+	public void testDbSystemNameCoversEveryDatabaseType() {
+		// Every DatabaseType must map to a non-null OTel db.system.name. Guards against the previous
+		// exhaustive-switch-without-default that threw for DatabaseType constants added after this module compiled.
+		Assertions.assertEquals("postgresql", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.POSTGRESQL));
+		Assertions.assertEquals("mysql", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.MYSQL));
+		Assertions.assertEquals("mariadb", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.MARIA_DB));
+		Assertions.assertEquals("sqlite", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.SQLITE));
+		Assertions.assertEquals("microsoft.sql_server", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.SQL_SERVER));
+		Assertions.assertEquals("oracle.db", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.ORACLE));
+		Assertions.assertEquals("other_sql", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.GENERIC));
+
+		for (DatabaseType databaseType : DatabaseType.values()) {
+			String dbSystemName = OpenTelemetryMetricsCollector.dbSystemName(databaseType);
+			Assertions.assertNotNull(dbSystemName, "db.system.name must be non-null for " + databaseType);
+			if (databaseType != DatabaseType.GENERIC)
+				Assertions.assertNotEquals("other_sql", dbSystemName,
+						databaseType + " should map to a specific db.system.name, not the generic fallback");
+		}
+	}
+
+	@Test
 	public void recordsStatementResponseAndPoolMetrics() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector

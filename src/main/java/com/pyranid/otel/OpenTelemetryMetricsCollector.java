@@ -752,12 +752,19 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	}
 
 	@NonNull
-	private static String dbSystemName(@NonNull DatabaseType databaseType) {
+	static String dbSystemName(@NonNull DatabaseType databaseType) {
 		requireNonNull(databaseType);
+		// Maps to OpenTelemetry's db.system.name registry values. A default arm keeps this forward-compatible: a future
+		// DatabaseType added to the core falls back to "other_sql" instead of throwing at runtime (the previous switch had
+		// no default, so values added after this module was compiled would fail).
 		return switch (databaseType) {
 			case POSTGRESQL -> "postgresql";
+			case MYSQL -> "mysql";
+			case MARIA_DB -> "mariadb";
+			case SQLITE -> "sqlite";
+			case SQL_SERVER -> "microsoft.sql_server";
 			case ORACLE -> "oracle.db";
-			case GENERIC -> "other_sql";
+			default -> "other_sql"; // GENERIC and any future DatabaseType
 		};
 	}
 
