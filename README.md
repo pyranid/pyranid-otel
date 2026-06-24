@@ -8,7 +8,7 @@ OpenTelemetry metrics integration for [Pyranid](https://www.pyranid.com).
 <dependency>
   <groupId>com.pyranid</groupId>
   <artifactId>pyranid-otel</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
