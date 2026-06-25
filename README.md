@@ -12,8 +12,6 @@ OpenTelemetry metrics integration for [Pyranid](https://www.pyranid.com).
 </dependency>
 ```
 
-`pyranid-otel` is optional. The core `com.pyranid:pyranid` artifact remains dependency-free.
-
 ## Configuration
 
 ```java
@@ -74,6 +72,10 @@ Pyranid does not synthesize pool-internal metrics such as idle counts, max conne
 | Pyranid `DatabaseType` | `db.system.name` |
 | --- | --- |
 | `POSTGRESQL` | `postgresql` |
+| `MYSQL` | `mysql` |
+| `MARIA_DB` | `mariadb` |
+| `SQLITE` | `sqlite` |
+| `SQL_SERVER` | `microsoft.sql_server` |
 | `ORACLE` | `oracle.db` |
 | `GENERIC` | `other_sql` |
 
@@ -92,7 +94,7 @@ Artifact signing and Maven Central publishing are isolated in the `release` prof
 
 ## Compatibility
 
-This module pins OpenTelemetry Java BOM `1.61.0`, chosen at implementation time for Pyranid `4.2.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
+This release depends on Pyranid `4.4.0` and pins OpenTelemetry Java BOM `1.61.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
 
 The jar declares the automatic JPMS module name `com.pyranid.otel`.
 
