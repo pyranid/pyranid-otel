@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Pyranid OpenTelemetry Integration will be documented in this file.
+All notable changes to Pyranid's OpenTelemetry Integration will be documented in this file.
 
 ## 1.1.0
 
