@@ -70,6 +70,8 @@
 		<junit.version>5.13.3</junit.version>
 		<hsqldb.version>2.7.4</hsqldb.version>
 		<maven.enforcer.plugin.version>3.6.2</maven.enforcer.plugin.version>
+		<japicmp.maven.plugin.version>0.26.1</japicmp.maven.plugin.version>
+		<japicmp.baseline.version>1.1.0</japicmp.baseline.version>
 	</properties>
 
 	<dependencyManagement>
@@ -105,8 +107,60 @@
 									<version>[17,)</version>
 								</requireJavaVersion>
 								<dependencyConvergence/>
+								<bannedDependencies>
+									<searchTransitive>true</searchTransitive>
+									<excludes>
+										<exclude>*:*:*:*:compile</exclude>
+										<exclude>*:*:*:*:runtime</exclude>
+									</excludes>
+									<includes>
+										<include>io.opentelemetry:opentelemetry-api:*:*:compile</include>
+										<include>io.opentelemetry:opentelemetry-context:*:*:compile</include>
+										<include>io.opentelemetry:opentelemetry-common:*:*:compile</include>
+										<include>io.opentelemetry:opentelemetry-api:*:*:runtime</include>
+										<include>io.opentelemetry:opentelemetry-context:*:*:runtime</include>
+										<include>io.opentelemetry:opentelemetry-common:*:*:runtime</include>
+									</includes>
+									<message>pyranid-otel may declare only the OpenTelemetry API (and its context dependency) at compile/runtime scope; the SDK, exporters, and everything else must be provided or test scope.</message>
+								</bannedDependencies>
 							</rules>
 						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<groupId>com.github.siom79.japicmp</groupId>
+				<artifactId>japicmp-maven-plugin</artifactId>
+				<version>${japicmp.maven.plugin.version}</version>
+				<configuration>
+					<oldVersion>
+						<dependency>
+							<groupId>${project.groupId}</groupId>
+							<artifactId>${project.artifactId}</artifactId>
+							<version>${japicmp.baseline.version}</version>
+							<type>jar</type>
+						</dependency>
+					</oldVersion>
+					<newVersion>
+						<file>
+							<path>${project.build.directory}/${project.artifactId}-${project.version}.${project.packaging}</path>
+						</file>
+					</newVersion>
+					<parameter>
+						<accessModifier>public</accessModifier>
+						<onlyModified>true</onlyModified>
+					</parameter>
+					<breakBuildBasedOnSemanticVersioning>true</breakBuildBasedOnSemanticVersioning>
+					<breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
+					<breakBuildOnSourceIncompatibleModifications>true</breakBuildOnSourceIncompatibleModifications>
+				</configuration>
+				<executions>
+					<execution>
+						<id>check-api-compatibility</id>
+						<phase>verify</phase>
+						<goals>
+							<goal>cmp</goal>
+						</goals>
 					</execution>
 				</executions>
 			</plugin>
