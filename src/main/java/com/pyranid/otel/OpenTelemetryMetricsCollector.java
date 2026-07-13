@@ -16,7 +16,6 @@
 
 package com.pyranid.otel;
 
-import com.pyranid.DatabaseException;
 import com.pyranid.DatabaseType;
 import com.pyranid.MetricsCollector;
 import com.pyranid.StatementContext;
@@ -43,12 +42,15 @@ import javax.annotation.concurrent.NotThreadSafe;
 import javax.annotation.concurrent.ThreadSafe;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import static java.util.Objects.requireNonNull;
 
@@ -74,16 +76,13 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private static final String OUTCOME_SUCCESS;
 	@NonNull
 	private static final String OUTCOME_FAILURE;
+	private static final int SQL_CLASSIFICATION_CACHE_CAPACITY;
+	private static final int SQL_CLASSIFICATION_CACHE_MASK;
+	private static final int SQL_CLASSIFICATION_CACHE_PROBES;
 	@NonNull
-	private static final Pattern OPERATION_PATTERN;
+	private static final List<Double> OPERATION_DURATION_BUCKET_BOUNDARIES;
 	@NonNull
-	private static final Pattern INSERT_COLLECTION_PATTERN;
-	@NonNull
-	private static final Pattern UPDATE_COLLECTION_PATTERN;
-	@NonNull
-	private static final Pattern DELETE_COLLECTION_PATTERN;
-	@NonNull
-	private static final Pattern SELECT_COLLECTION_PATTERN;
+	private static final List<Long> RETURNED_ROWS_BUCKET_BOUNDARIES;
 
 	@NonNull
 	private static final AttributeKey<String> DB_SYSTEM_NAME_ATTRIBUTE_KEY;
@@ -121,11 +120,11 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		UNKNOWN_OPERATION = "UNKNOWN";
 		OUTCOME_SUCCESS = "success";
 		OUTCOME_FAILURE = "failure";
-		OPERATION_PATTERN = Pattern.compile("(?is)^\\s*(?:(?:(?:/\\*.*?\\*/)|(?:--[^\\n]*(?:\\n|$)))\\s*)*([A-Za-z]+)");
-		INSERT_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*insert\\s+into\\s+([^\\s(]+)");
-		UPDATE_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*update\\s+([^\\s(]+)");
-		DELETE_COLLECTION_PATTERN = Pattern.compile("(?is)^\\s*delete\\s+from\\s+([^\\s(]+)");
-		SELECT_COLLECTION_PATTERN = Pattern.compile("(?is)\\bfrom\\s+([^\\s,()]+)");
+		SQL_CLASSIFICATION_CACHE_CAPACITY = 1024;
+		SQL_CLASSIFICATION_CACHE_MASK = SQL_CLASSIFICATION_CACHE_CAPACITY - 1;
+		SQL_CLASSIFICATION_CACHE_PROBES = 4;
+		OPERATION_DURATION_BUCKET_BOUNDARIES = List.of(0.001D, 0.005D, 0.01D, 0.05D, 0.1D, 0.5D, 1D, 5D, 10D);
+		RETURNED_ROWS_BUCKET_BOUNDARIES = List.of(1L, 2L, 5L, 10L, 20L, 50L, 100L, 200L, 500L, 1_000L, 2_000L, 5_000L, 10_000L);
 
 		DB_SYSTEM_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.system.name");
 		DB_OPERATION_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.operation.name");
@@ -186,6 +185,8 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private final LongHistogram streamRowsConsumedHistogram;
 	@NonNull
 	private final LongCounter postTransactionOperationsCounter;
+	@NonNull
+	private final DoubleHistogram postTransactionDurationHistogram;
 	@Nullable
 	private final String poolName;
 	@Nullable
@@ -194,6 +195,8 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private final Boolean recordCollectionName;
 	@NonNull
 	private final Boolean recordFullSqlState;
+	@NonNull
+	private final AtomicReferenceArray<SqlClassificationCacheEntry> sqlClassificationCache;
 
 	/**
 	 * Acquires a builder for {@link OpenTelemetryMetricsCollector} instances, using {@link GlobalOpenTelemetry}
@@ -259,15 +262,18 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		this.namespace = builder.namespace;
 		this.recordCollectionName = builder.recordCollectionName;
 		this.recordFullSqlState = builder.recordFullSqlState;
+		this.sqlClassificationCache = new AtomicReferenceArray<>(SQL_CLASSIFICATION_CACHE_CAPACITY);
 
 		this.operationDurationHistogram = meter.histogramBuilder("db.client.operation.duration")
 				.setDescription("Duration of database client operations.")
 				.setUnit("s")
+				.setExplicitBucketBoundariesAdvice(OPERATION_DURATION_BUCKET_BOUNDARIES)
 				.build();
 		this.returnedRowsHistogram = meter.histogramBuilder("db.client.response.returned_rows")
 				.ofLongs()
 				.setDescription("Number of rows returned by a database response.")
 				.setUnit("{row}")
+				.setExplicitBucketBoundariesAdvice(RETURNED_ROWS_BUCKET_BOUNDARIES)
 				.build();
 		this.connectionWaitTimeHistogram = meter.histogramBuilder("db.client.connection.wait_time")
 				.setDescription("Time spent waiting for a database connection.")
@@ -344,6 +350,10 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		this.postTransactionOperationsCounter = meter.counterBuilder("pyranid.post_transaction.operations")
 				.setDescription("Total number of post-transaction operations.")
 				.setUnit("{operation}")
+				.build();
+		this.postTransactionDurationHistogram = meter.histogramBuilder("pyranid.post_transaction.duration")
+				.setDescription("Duration of post-transaction operations.")
+				.setUnit("s")
 				.build();
 	}
 
@@ -423,12 +433,12 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@Override
 	public void didExitTransactionClosure(@NonNull Transaction transaction,
-																				@NonNull TransactionClosureOutcome outcome,
-																				@NonNull DatabaseType databaseType,
-																				@NonNull Duration logicalDuration,
-																				@Nullable Throwable thrown) {
+															@NonNull TransactionClosureOutcome outcome,
+															@NonNull DatabaseType databaseType,
+															@NonNull Duration logicalDuration,
+															@Nullable Throwable thrown) {
 		requireNonNull(outcome);
-		Attributes attributes = transactionClosureAttributes(databaseType, transaction.getTransactionIsolation(), outcome);
+		Attributes attributes = transactionClosureAttributes(databaseType, transaction.getTransactionIsolation(), outcome, thrown);
 		this.transactionClosureDurationHistogram.record(seconds(logicalDuration), attributes);
 		this.transactionCountCounter.add(1, attributes);
 	}
@@ -448,6 +458,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 																							 @NonNull Throwable throwable) {
 		Attributes attributes = Attributes.builder()
 				.putAll(databaseAttributes(databaseType))
+				.put(TRANSACTION_ISOLATION_ATTRIBUTE_KEY, enumValue(isolation))
 				.put(TRANSACTION_BEGIN_PHASE_ATTRIBUTE_KEY, enumValue(phase))
 				.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable))
 				.build();
@@ -519,11 +530,13 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(statementLog);
 		requireNonNull(result);
 
-		Attributes attributes = statementAttributes(ctx, null);
+		Integer batchSize = statementLog.getBatchSize().orElse(null);
+		Attributes attributes = statementAttributes(ctx, null, null, batchSize);
 		this.operationDurationHistogram.record(seconds(statementLog.getTotalDuration()), attributes);
 		recordStatementComponentDurations(statementLog, attributes);
 
-		statementLog.getBatchSize().ifPresent(batchSize -> this.statementBatchSizeHistogram.record(batchSize.longValue(), attributes));
+		if (batchSize != null)
+			this.statementBatchSizeHistogram.record(batchSize.longValue(), attributes);
 
 		Long rowsReturned = result.rowsReturned();
 		if (rowsReturned != null)
@@ -544,9 +557,12 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(databaseType);
 		requireNonNull(throwable);
 
-		Attributes attributes = statementAttributes(ctx, throwable, databaseType);
+		Integer batchSize = statementLog.getBatchSize().orElse(null);
+		Attributes attributes = statementAttributes(ctx, throwable, databaseType, batchSize);
 		this.operationDurationHistogram.record(seconds(statementLog.getTotalDuration()), attributes);
 		recordStatementComponentDurations(statementLog, attributes);
+		if (batchSize != null)
+			this.statementBatchSizeHistogram.record(batchSize.longValue(), attributes);
 		this.statementErrorsCounter.add(1, attributes);
 	}
 
@@ -559,7 +575,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(databaseType);
 		requireNonNull(throwable);
 
-		Attributes attributes = streamAttributes(databaseType, StreamTerminalOutcome.OPEN_FAILURE);
+		Attributes attributes = streamAttributes(databaseType, StreamTerminalOutcome.OPEN_FAILURE, throwable);
 		this.streamDurationHistogram.record(seconds(openDuration), attributes);
 	}
 
@@ -574,7 +590,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(rowsConsumed);
 		requireNonNull(streamDuration);
 
-		Attributes attributes = streamAttributes(ctx.getDatabaseType(), outcome);
+		Attributes attributes = streamAttributes(ctx.getDatabaseType(), outcome, throwable);
 		this.streamDurationHistogram.record(seconds(streamDuration), attributes);
 		this.streamRowsConsumedHistogram.record(rowsConsumed, attributes);
 	}
@@ -592,7 +608,9 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		if (throwable != null)
 			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
 
-		this.postTransactionOperationsCounter.add(1, builder.build());
+		Attributes attributes = builder.build();
+		this.postTransactionOperationsCounter.add(1, attributes);
+		this.postTransactionDurationHistogram.record(seconds(duration), attributes);
 	}
 
 	@Override
@@ -603,25 +621,21 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@NonNull
 	private Attributes statementAttributes(@NonNull StatementContext<?> ctx,
-																				 @Nullable Throwable throwable) {
-		return statementAttributes(ctx, throwable, null);
-	}
-
-	@NonNull
-	private Attributes statementAttributes(@NonNull StatementContext<?> ctx,
-																				 @Nullable Throwable throwable,
-																				 @Nullable DatabaseType databaseTypeOverride) {
+																 @Nullable Throwable throwable,
+																 @Nullable DatabaseType databaseTypeOverride,
+																 @Nullable Integer batchSize) {
 		requireNonNull(ctx);
+		SqlClassification sqlClassification = sqlClassificationFor(ctx.getStatement().getSql());
 
 		AttributesBuilder builder = Attributes.builder()
 				.putAll(databaseAttributes(databaseTypeOverride == null ? ctx.getDatabaseType() : databaseTypeOverride))
-				.put(DB_OPERATION_NAME_ATTRIBUTE_KEY, operationNameFor(ctx));
+				.put(DB_OPERATION_NAME_ATTRIBUTE_KEY, operationName(sqlClassification.operation(), batchSize != null));
 
 		if (this.namespace != null)
 			builder.put(DB_NAMESPACE_ATTRIBUTE_KEY, this.namespace);
 
 		if (this.recordCollectionName) {
-			String collectionName = collectionNameFor(ctx);
+			String collectionName = sqlClassification.collectionName();
 			if (collectionName != null)
 				builder.put(DB_COLLECTION_NAME_ATTRIBUTE_KEY, collectionName);
 		}
@@ -647,8 +661,15 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(transaction);
 		requireNonNull(databaseType);
 
-		if (this.activeTransactions.add(transaction))
+		if (!this.activeTransactions.add(transaction))
+			return;
+
+		try {
 			this.activeTransactionsCounter.add(1, databaseAttributes(databaseType));
+		} catch (RuntimeException | Error throwable) {
+			this.activeTransactions.remove(transaction);
+			throw throwable;
+		}
 	}
 
 	private void markPhysicalTransactionInactive(@NonNull Transaction transaction,
@@ -656,19 +677,31 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		requireNonNull(transaction);
 		requireNonNull(databaseType);
 
-		if (this.activeTransactions.remove(transaction))
+		if (!this.activeTransactions.remove(transaction))
+			return;
+
+		try {
 			this.activeTransactionsCounter.add(-1, databaseAttributes(databaseType));
+		} catch (RuntimeException | Error throwable) {
+			this.activeTransactions.add(transaction);
+			throw throwable;
+		}
 	}
 
 	@NonNull
 	private Attributes transactionClosureAttributes(@NonNull DatabaseType databaseType,
-																									@NonNull TransactionIsolation isolation,
-																									@NonNull TransactionClosureOutcome outcome) {
-		return Attributes.builder()
+																	@NonNull TransactionIsolation isolation,
+																	@NonNull TransactionClosureOutcome outcome,
+																	@Nullable Throwable throwable) {
+		AttributesBuilder builder = Attributes.builder()
 				.putAll(databaseAttributes(databaseType))
 				.put(TRANSACTION_ISOLATION_ATTRIBUTE_KEY, enumValue(isolation))
-				.put(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY, enumValue(outcome))
-				.build();
+				.put(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY, enumValue(outcome));
+
+		if (throwable != null)
+			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
+
+		return builder.build();
 	}
 
 	@NonNull
@@ -690,11 +723,16 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@NonNull
 	private Attributes streamAttributes(@NonNull DatabaseType databaseType,
-																			@NonNull StreamTerminalOutcome outcome) {
-		return Attributes.builder()
+														@NonNull StreamTerminalOutcome outcome,
+														@Nullable Throwable throwable) {
+		AttributesBuilder builder = Attributes.builder()
 				.putAll(databaseAttributes(databaseType))
-				.put(STREAM_OUTCOME_ATTRIBUTE_KEY, enumValue(outcome))
-				.build();
+				.put(STREAM_OUTCOME_ATTRIBUTE_KEY, enumValue(outcome));
+
+		if (throwable != null)
+			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
+
+		return builder.build();
 	}
 
 	private void recordStatementComponentDurations(@NonNull StatementLog<?> statementLog,
@@ -769,50 +807,499 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	}
 
 	@NonNull
-	private static String operationNameFor(@NonNull StatementContext<?> ctx) {
-		requireNonNull(ctx);
-		Matcher matcher = OPERATION_PATTERN.matcher(ctx.getStatement().getSql());
-		if (!matcher.find())
-			return UNKNOWN_OPERATION;
-		return matcher.group(1).toUpperCase(Locale.ROOT);
-	}
-
-	@Nullable
-	private static String collectionNameFor(@NonNull StatementContext<?> ctx) {
-		requireNonNull(ctx);
-		String sql = ctx.getStatement().getSql();
-		String operation = operationNameFor(ctx);
-		Pattern pattern = switch (operation) {
-			case "INSERT" -> INSERT_COLLECTION_PATTERN;
-			case "UPDATE" -> UPDATE_COLLECTION_PATTERN;
-			case "DELETE" -> DELETE_COLLECTION_PATTERN;
-			case "SELECT", "WITH" -> SELECT_COLLECTION_PATTERN;
-			default -> null;
-		};
-
-		if (pattern == null)
-			return null;
-
-		Matcher matcher = pattern.matcher(sql);
-		if (!matcher.find())
-			return null;
-
-		return normalizeIdentifier(matcher.group(1));
+	static String operationNameForSql(@NonNull String sql,
+																	 boolean batch) {
+		String operation = analyzeSql(requireNonNull(sql)).operation();
+		return operationName(operation, batch);
 	}
 
 	@NonNull
-	private static String normalizeIdentifier(@NonNull String identifier) {
-		requireNonNull(identifier);
-		String normalized = identifier.trim();
-		while (normalized.endsWith(";") || normalized.endsWith(","))
-			normalized = normalized.substring(0, normalized.length() - 1);
+	private static String operationName(@NonNull String operation,
+															 boolean batch) {
+		requireNonNull(operation);
 
-		if ((normalized.startsWith("\"") && normalized.endsWith("\""))
-				|| (normalized.startsWith("`") && normalized.endsWith("`"))
-				|| (normalized.startsWith("[") && normalized.endsWith("]")))
-			normalized = normalized.substring(1, normalized.length() - 1);
+		if (!batch)
+			return operation;
 
-		return normalized;
+		return UNKNOWN_OPERATION.equals(operation) ? "BATCH" : "BATCH " + operation;
+	}
+
+	@Nullable
+	static String collectionNameForSql(@NonNull String sql) {
+		return collectionName(analyzeSql(requireNonNull(sql)));
+	}
+
+	@NonNull
+	private SqlClassification sqlClassificationFor(@NonNull String sql) {
+		requireNonNull(sql);
+		int firstIndex = spreadHash(sql.hashCode()) & SQL_CLASSIFICATION_CACHE_MASK;
+		int emptyIndex = -1;
+
+		// Adjacent probes let colliding hot statements coexist while keeping the cache bounded and lock-free.
+		for (int offset = 0; offset < SQL_CLASSIFICATION_CACHE_PROBES; offset++) {
+			int index = (firstIndex + offset) & SQL_CLASSIFICATION_CACHE_MASK;
+			SqlClassificationCacheEntry entry = this.sqlClassificationCache.get(index);
+
+			if (entry == null) {
+				if (emptyIndex < 0)
+					emptyIndex = index;
+			} else if (entry.sql().equals(sql)) {
+				return entry.classification();
+			}
+		}
+
+		SqlAnalysis analysis = analyzeSql(sql);
+		SqlClassification classification = new SqlClassification(analysis.operation(),
+				this.recordCollectionName ? collectionName(analysis) : null);
+		SqlClassificationCacheEntry newEntry = new SqlClassificationCacheEntry(sql, classification);
+
+		if (emptyIndex < 0 || !this.sqlClassificationCache.compareAndSet(emptyIndex, null, newEntry))
+			this.sqlClassificationCache.set(firstIndex, newEntry);
+
+		return classification;
+	}
+
+	private static int spreadHash(int hash) {
+		return hash ^ (hash >>> 16);
+	}
+
+	@Nullable
+	private static String collectionName(@NonNull SqlAnalysis analysis) {
+		requireNonNull(analysis);
+		if (analysis.operationIndex() < 0 || analysis.commonTableExpression() || hasSecondaryOperation(analysis))
+			return null;
+
+		return switch (analysis.operation()) {
+			case "INSERT" -> insertCollectionName(analysis);
+			case "UPDATE" -> updateCollectionName(analysis);
+			case "DELETE" -> deleteCollectionName(analysis);
+			case "SELECT" -> selectCollectionName(analysis);
+			default -> null;
+		};
+	}
+
+	private static boolean hasSecondaryOperation(@NonNull SqlAnalysis analysis) {
+		for (int i = analysis.operationIndex() + 1; i < analysis.endIndex(); i++)
+			if (operationWord(analysis.tokens().get(i)))
+				return true;
+
+		return false;
+	}
+
+	@Nullable
+	private static String insertCollectionName(@NonNull SqlAnalysis analysis) {
+		int index = analysis.operationIndex() + 1;
+		if (!isWord(analysis.tokens(), index, "INTO"))
+			return null;
+
+		ParsedIdentifier identifier = parseIdentifier(analysis.tokens(), index + 1, analysis.endIndex());
+		return identifier == null ? null : identifier.value();
+	}
+
+	@Nullable
+	private static String updateCollectionName(@NonNull SqlAnalysis analysis) {
+		int index = analysis.operationIndex() + 1;
+		if (isWord(analysis.tokens(), index, "ONLY"))
+			index++;
+
+		ParsedIdentifier identifier = parseIdentifier(analysis.tokens(), index, analysis.endIndex());
+		if (identifier == null)
+			return null;
+
+		int depth = 0;
+		for (int i = identifier.nextIndex(); i < analysis.endIndex(); i++) {
+			SqlToken token = analysis.tokens().get(i);
+			if (token.isSymbol("("))
+				depth++;
+			else if (token.isSymbol(")"))
+				depth = Math.max(0, depth - 1);
+			else if (depth == 0 && token.isWord("SET"))
+				return identifier.value();
+			else if (depth == 0 && (token.isSymbol(",") || token.isWord("JOIN")))
+				return null;
+		}
+
+		return null;
+	}
+
+	@Nullable
+	private static String deleteCollectionName(@NonNull SqlAnalysis analysis) {
+		int index = analysis.operationIndex() + 1;
+		if (!isWord(analysis.tokens(), index, "FROM"))
+			return null;
+
+		ParsedIdentifier identifier = parseIdentifier(analysis.tokens(), index + 1, analysis.endIndex());
+		if (identifier == null)
+			return null;
+
+		int depth = 0;
+		for (int i = identifier.nextIndex(); i < analysis.endIndex(); i++) {
+			SqlToken token = analysis.tokens().get(i);
+			if (token.isSymbol("("))
+				depth++;
+			else if (token.isSymbol(")"))
+				depth = Math.max(0, depth - 1);
+			else if (depth == 0 && (token.isSymbol(",") || token.isWord("JOIN") || token.isWord("USING")))
+				return null;
+		}
+
+		return identifier.value();
+	}
+
+	@Nullable
+	private static String selectCollectionName(@NonNull SqlAnalysis analysis) {
+		List<SqlToken> tokens = analysis.tokens();
+		int depth = 0;
+		int fromIndex = -1;
+
+		for (int i = analysis.operationIndex() + 1; i < analysis.endIndex(); i++) {
+			SqlToken token = tokens.get(i);
+			if (token.isSymbol("("))
+				depth++;
+			else if (token.isSymbol(")"))
+				depth = Math.max(0, depth - 1);
+			else if (depth == 0 && token.isWord("FROM")) {
+				fromIndex = i;
+				break;
+			}
+		}
+
+		if (fromIndex < 0 || fromIndex + 1 >= analysis.endIndex()
+				|| tokens.get(fromIndex + 1).isWord("LATERAL")
+				|| tokens.get(fromIndex + 1).isSymbol("("))
+			return null;
+
+		ParsedIdentifier identifier = parseIdentifier(tokens, fromIndex + 1, analysis.endIndex());
+		if (identifier == null || (identifier.nextIndex() < analysis.endIndex()
+				&& tokens.get(identifier.nextIndex()).isSymbol("(")))
+			return null;
+
+		depth = 0;
+		for (int i = identifier.nextIndex(); i < analysis.endIndex(); i++) {
+			SqlToken token = tokens.get(i);
+			if (token.isSymbol("("))
+				depth++;
+			else if (token.isSymbol(")"))
+				depth = Math.max(0, depth - 1);
+			else if (depth == 0 && (token.isSymbol(",") || token.isWord("JOIN") || token.isWord("APPLY")
+					|| token.isWord("UNION") || token.isWord("INTERSECT") || token.isWord("EXCEPT")
+					|| token.isWord("FROM")))
+				return null;
+		}
+
+		return identifier.value();
+	}
+
+	@Nullable
+	private static ParsedIdentifier parseIdentifier(@NonNull List<SqlToken> tokens,
+																			 int startIndex,
+																			 int endIndex) {
+		if (startIndex >= endIndex || !tokens.get(startIndex).identifier())
+			return null;
+
+		StringBuilder value = new StringBuilder(tokens.get(startIndex).text());
+		int index = startIndex + 1;
+
+		while (index + 1 < endIndex && tokens.get(index).isSymbol(".") && tokens.get(index + 1).identifier()) {
+			value.append('.').append(tokens.get(index + 1).text());
+			index += 2;
+		}
+
+		return new ParsedIdentifier(value.toString(), index);
+	}
+
+	private static boolean isWord(@NonNull List<SqlToken> tokens,
+														int index,
+														@NonNull String word) {
+		return index >= 0 && index < tokens.size() && tokens.get(index).isWord(word);
+	}
+
+	@NonNull
+	private static SqlAnalysis analyzeSql(@NonNull String sql) {
+		List<SqlToken> tokens = tokenizeSql(requireNonNull(sql));
+		int endIndex = firstStatementEnd(tokens);
+		if (endIndex == 0 || !tokens.get(0).word())
+			return new SqlAnalysis(tokens, -1, endIndex, UNKNOWN_OPERATION, false);
+
+		if (!tokens.get(0).isWord("WITH"))
+			return new SqlAnalysis(tokens, 0, endIndex, tokens.get(0).upperText(), false);
+
+		int depth = 0;
+		boolean completedCommonTableExpression = false;
+		for (int i = 1; i < endIndex; i++) {
+			SqlToken token = tokens.get(i);
+			if (token.isSymbol("(")) {
+				depth++;
+			} else if (token.isSymbol(")")) {
+				if (depth == 1)
+					completedCommonTableExpression = true;
+				depth = Math.max(0, depth - 1);
+			} else if (depth == 0 && completedCommonTableExpression && operationWord(token)) {
+				return new SqlAnalysis(tokens, i, endIndex, token.upperText(), true);
+			}
+		}
+
+		return new SqlAnalysis(tokens, -1, endIndex, UNKNOWN_OPERATION, true);
+	}
+
+	private static int firstStatementEnd(@NonNull List<SqlToken> tokens) {
+		int depth = 0;
+		for (int i = 0; i < tokens.size(); i++) {
+			SqlToken token = tokens.get(i);
+			if (token.isSymbol("("))
+				depth++;
+			else if (token.isSymbol(")"))
+				depth = Math.max(0, depth - 1);
+			else if (depth == 0 && token.isSymbol(";"))
+				return i;
+		}
+
+		return tokens.size();
+	}
+
+	private static boolean operationWord(@NonNull SqlToken token) {
+		if (!token.word())
+			return false;
+
+		return switch (token.upperText()) {
+			case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "CALL", "EXECUTE", "CREATE", "ALTER",
+					"DROP", "TRUNCATE", "GRANT", "REVOKE" -> true;
+			default -> false;
+		};
+	}
+
+	@NonNull
+	private static List<SqlToken> tokenizeSql(@NonNull String sql) {
+		List<SqlToken> tokens = new ArrayList<>();
+		int index = 0;
+
+		while (index < sql.length()) {
+			char character = sql.charAt(index);
+			if (Character.isWhitespace(character)) {
+				index++;
+				continue;
+			}
+
+			if (character == '-' && index + 1 < sql.length() && sql.charAt(index + 1) == '-') {
+				index = skipLine(sql, index + 2);
+				continue;
+			}
+
+			if (character == '#') {
+				index = skipLine(sql, index + 1);
+				continue;
+			}
+
+			if (character == '/' && index + 1 < sql.length() && sql.charAt(index + 1) == '*') {
+				index = skipBlockComment(sql, index + 2);
+				continue;
+			}
+
+			if ((character == 'q' || character == 'Q') && index + 2 < sql.length() && sql.charAt(index + 1) == '\'') {
+				int nextIndex = skipOracleQuotedString(sql, index);
+				if (nextIndex > index) {
+					index = nextIndex;
+					continue;
+				}
+			}
+
+			if (character == '\'') {
+				index = skipQuoted(sql, index + 1, '\'', true);
+				continue;
+			}
+
+			if (character == '$') {
+				int nextIndex = skipDollarQuotedString(sql, index);
+				if (nextIndex > index) {
+					index = nextIndex;
+					continue;
+				}
+			}
+
+			if (character == '\"' || character == '`' || character == '[') {
+				QuotedIdentifier quotedIdentifier = readQuotedIdentifier(sql, index, character);
+				tokens.add(new SqlToken(SqlTokenType.IDENTIFIER, quotedIdentifier.value()));
+				index = quotedIdentifier.nextIndex();
+				continue;
+			}
+
+			if (Character.isLetter(character) || character == '_') {
+				int startIndex = index++;
+				while (index < sql.length()) {
+					char nextCharacter = sql.charAt(index);
+					if (!Character.isLetterOrDigit(nextCharacter) && nextCharacter != '_' && nextCharacter != '$')
+						break;
+					index++;
+				}
+				tokens.add(new SqlToken(SqlTokenType.WORD, sql.substring(startIndex, index)));
+				continue;
+			}
+
+			tokens.add(new SqlToken(SqlTokenType.SYMBOL, String.valueOf(character)));
+			index++;
+		}
+
+		return List.copyOf(tokens);
+	}
+
+	private static int skipLine(@NonNull String sql,
+														int startIndex) {
+		int newlineIndex = sql.indexOf('\n', startIndex);
+		return newlineIndex < 0 ? sql.length() : newlineIndex + 1;
+	}
+
+	private static int skipBlockComment(@NonNull String sql,
+																		int startIndex) {
+		int depth = 1;
+		int index = startIndex;
+		while (index < sql.length() && depth > 0) {
+			if (index + 1 < sql.length() && sql.charAt(index) == '/' && sql.charAt(index + 1) == '*') {
+				depth++;
+				index += 2;
+			} else if (index + 1 < sql.length() && sql.charAt(index) == '*' && sql.charAt(index + 1) == '/') {
+				depth--;
+				index += 2;
+			} else {
+				index++;
+			}
+		}
+		return index;
+	}
+
+	private static int skipQuoted(@NonNull String sql,
+														int startIndex,
+														char quote,
+														boolean backslashEscapes) {
+		int index = startIndex;
+		while (index < sql.length()) {
+			char character = sql.charAt(index);
+			if (backslashEscapes && character == '\\' && index + 1 < sql.length()) {
+				index += 2;
+			} else if (character == quote) {
+				if (index + 1 < sql.length() && sql.charAt(index + 1) == quote)
+					index += 2;
+				else
+					return index + 1;
+			} else {
+				index++;
+			}
+		}
+		return sql.length();
+	}
+
+	private static int skipDollarQuotedString(@NonNull String sql,
+																				int startIndex) {
+		int delimiterEnd = startIndex + 1;
+		while (delimiterEnd < sql.length()) {
+			char character = sql.charAt(delimiterEnd);
+			if (character == '$')
+				break;
+			if (!Character.isLetterOrDigit(character) && character != '_')
+				return startIndex;
+			delimiterEnd++;
+		}
+
+		if (delimiterEnd >= sql.length())
+			return startIndex;
+
+		String delimiter = sql.substring(startIndex, delimiterEnd + 1);
+		int closingIndex = sql.indexOf(delimiter, delimiterEnd + 1);
+		return closingIndex < 0 ? sql.length() : closingIndex + delimiter.length();
+	}
+
+	private static int skipOracleQuotedString(@NonNull String sql,
+																			int startIndex) {
+		char openingDelimiter = sql.charAt(startIndex + 2);
+		char closingDelimiter = switch (openingDelimiter) {
+			case '[' -> ']';
+			case '(' -> ')';
+			case '{' -> '}';
+			case '<' -> '>';
+			default -> openingDelimiter;
+		};
+
+		for (int index = startIndex + 3; index + 1 < sql.length(); index++) {
+			if (sql.charAt(index) == closingDelimiter && sql.charAt(index + 1) == '\'')
+				return index + 2;
+		}
+		return sql.length();
+	}
+
+	@NonNull
+	private static QuotedIdentifier readQuotedIdentifier(@NonNull String sql,
+																								int startIndex,
+																								char openingQuote) {
+		char closingQuote = openingQuote == '[' ? ']' : openingQuote;
+		StringBuilder value = new StringBuilder();
+		int index = startIndex + 1;
+		while (index < sql.length()) {
+			char character = sql.charAt(index);
+			if (character == closingQuote) {
+				if (index + 1 < sql.length() && sql.charAt(index + 1) == closingQuote) {
+					value.append(closingQuote);
+					index += 2;
+					continue;
+				}
+				return new QuotedIdentifier(value.toString(), index + 1);
+			}
+			value.append(character);
+			index++;
+		}
+
+		return new QuotedIdentifier(value.toString(), sql.length());
+	}
+
+	private enum SqlTokenType {
+		WORD,
+		IDENTIFIER,
+		SYMBOL
+	}
+
+	private record SqlToken(@NonNull SqlTokenType type,
+											@NonNull String text) {
+		private boolean word() {
+			return this.type == SqlTokenType.WORD;
+		}
+
+		private boolean identifier() {
+			return this.type == SqlTokenType.WORD || this.type == SqlTokenType.IDENTIFIER;
+		}
+
+		private boolean isWord(@NonNull String word) {
+			return word() && this.text.equalsIgnoreCase(word);
+		}
+
+		private boolean isSymbol(@NonNull String symbol) {
+			return this.type == SqlTokenType.SYMBOL && this.text.equals(symbol);
+		}
+
+		@NonNull
+		private String upperText() {
+			return this.text.toUpperCase(Locale.ROOT);
+		}
+	}
+
+	private record SqlAnalysis(@NonNull List<SqlToken> tokens,
+												 int operationIndex,
+												 int endIndex,
+												 @NonNull String operation,
+												 boolean commonTableExpression) {
+	}
+
+	private record SqlClassification(@NonNull String operation,
+														 @Nullable String collectionName) {
+	}
+
+	private record SqlClassificationCacheEntry(@NonNull String sql,
+																			 @NonNull SqlClassification classification) {
+	}
+
+	private record ParsedIdentifier(@NonNull String value,
+														int nextIndex) {
+	}
+
+	private record QuotedIdentifier(@NonNull String value,
+														int nextIndex) {
 	}
 
 	@NonNull
@@ -840,12 +1327,10 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	@Nullable
 	private static SQLException sqlExceptionFor(@Nullable Throwable throwable) {
 		Throwable current = throwable;
+		Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
 
-		while (current != null) {
+		while (current != null && visited.add(current)) {
 			if (current instanceof SQLException sqlException)
-				return sqlException;
-
-			if (current instanceof DatabaseException && current.getCause() instanceof SQLException sqlException)
 				return sqlException;
 
 			current = current.getCause();
@@ -857,7 +1342,18 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	@NonNull
 	private static String errorType(@NonNull Throwable throwable) {
 		requireNonNull(throwable);
-		return throwable.getClass().getName();
+		Throwable current = throwable;
+		Throwable mostRelevant = throwable;
+		Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+
+		while (current != null && visited.add(current)) {
+			if (current instanceof SQLException)
+				return current.getClass().getName();
+			mostRelevant = current;
+			current = current.getCause();
+		}
+
+		return mostRelevant.getClass().getName();
 	}
 
 	private static double seconds(@NonNull Duration duration) {
@@ -888,13 +1384,13 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		private Boolean recordFullSqlState;
 
 		private Builder() {
-			this.openTelemetry = GlobalOpenTelemetry.get();
+			this.openTelemetry = null;
 			this.instrumentationName = DEFAULT_INSTRUMENTATION_NAME;
 			this.instrumentationVersion = packageImplementationVersion();
 			this.poolName = null;
 			this.namespace = null;
 			this.recordCollectionName = false;
-			this.recordFullSqlState = false;
+			this.recordFullSqlState = true;
 		}
 
 		/**
@@ -992,7 +1488,7 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		/**
 		 * Controls whether full SQLSTATE values are emitted as {@code db.response.status_code}.
 		 * <p>
-		 * The default is {@code false}, which records only the two-character SQLSTATE class.
+		 * The default is {@code true}. Set this to {@code false} to record only the two-character SQLSTATE class.
 		 *
 		 * @param recordFullSqlState whether to record full SQLSTATE values
 		 * @return this builder
@@ -1008,7 +1504,8 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 			if (this.meter != null)
 				return this.meter;
 
-			MeterBuilder meterBuilder = requireNonNull(this.openTelemetry).meterBuilder(this.instrumentationName);
+			OpenTelemetry openTelemetry = this.openTelemetry == null ? GlobalOpenTelemetry.getOrNoop() : this.openTelemetry;
+			MeterBuilder meterBuilder = openTelemetry.meterBuilder(this.instrumentationName);
 
 			if (this.instrumentationVersion != null)
 				meterBuilder = meterBuilder.setInstrumentationVersion(this.instrumentationVersion);

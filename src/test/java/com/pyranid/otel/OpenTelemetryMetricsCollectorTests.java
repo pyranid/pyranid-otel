@@ -23,6 +23,8 @@ import com.pyranid.MetricsCollector;
 import com.pyranid.Transaction;
 import com.pyranid.TransactionIsolation;
 import com.pyranid.TransactionOptions;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -47,6 +49,7 @@ import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
@@ -64,11 +67,15 @@ public class OpenTelemetryMetricsCollectorTests {
 	private static final AttributeKey<String> DB_OPERATION_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.operation.name");
 	private static final AttributeKey<String> DB_NAMESPACE_ATTRIBUTE_KEY = AttributeKey.stringKey("db.namespace");
 	private static final AttributeKey<String> DB_COLLECTION_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.collection.name");
+	private static final AttributeKey<String> DB_RESPONSE_STATUS_CODE_ATTRIBUTE_KEY = AttributeKey.stringKey("db.response.status_code");
 	private static final AttributeKey<String> DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY = AttributeKey.stringKey("db.client.connection.pool.name");
+	private static final AttributeKey<String> ERROR_TYPE_ATTRIBUTE_KEY = AttributeKey.stringKey("error.type");
 	private static final AttributeKey<String> TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.closure_outcome");
 	private static final AttributeKey<String> TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.commit_outcome");
 	private static final AttributeKey<String> TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.rollback_outcome");
 	private static final AttributeKey<String> TRANSACTION_BEGIN_PHASE_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.physical_begin_phase");
+	private static final AttributeKey<String> TRANSACTION_RESULT_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.result");
+	private static final AttributeKey<String> TRANSACTION_ISOLATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.isolation");
 	private static final AttributeKey<String> SAVEPOINT_OPERATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.savepoint.operation");
 	private static final AttributeKey<String> STREAM_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.stream.outcome");
 
@@ -91,6 +98,99 @@ public class OpenTelemetryMetricsCollectorTests {
 				Assertions.assertNotEquals("other_sql", dbSystemName,
 						databaseType + " should map to a specific db.system.name, not the generic fallback");
 		}
+	}
+
+	@Test
+	public void explicitMeterDoesNotInitializeGlobalOpenTelemetry() {
+		GlobalOpenTelemetry.resetForTest();
+		try {
+			Assertions.assertFalse(GlobalOpenTelemetry.isSet());
+			OpenTelemetryMetricsCollector.builder().build();
+			Assertions.assertFalse(GlobalOpenTelemetry.isSet());
+			TestHarness harness = TestHarness.create();
+			OpenTelemetryMetricsCollector.withMeter(harness.openTelemetrySdk().getMeter("test-explicit-meter")).build();
+			Assertions.assertFalse(GlobalOpenTelemetry.isSet());
+		} finally {
+			GlobalOpenTelemetry.resetForTest();
+		}
+	}
+
+	@Test
+	public void parsesOperationAndCollectionNamesConservatively() {
+		Assertions.assertEquals("SELECT", OpenTelemetryMetricsCollector.operationNameForSql("""
+				/* DELETE FROM audit_log */
+				SELECT 'FROM credentials' FROM public.widgets
+				""", false));
+		Assertions.assertEquals("public.widgets", OpenTelemetryMetricsCollector.collectionNameForSql("""
+				/* DELETE FROM audit_log */
+				SELECT 'FROM credentials' FROM public.widgets
+				"""));
+		Assertions.assertEquals("widgets", OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT q'[FROM credentials]' FROM \"widgets\""));
+		Assertions.assertEquals("widgets", OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT $$FROM credentials$$ FROM `widgets`"));
+		Assertions.assertEquals("widgets", OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT 1 FROM [widgets] /* nested /* FROM credentials */ comment */"));
+
+		String cteSql = "WITH selected AS (SELECT id FROM widgets) SELECT id FROM selected";
+		Assertions.assertEquals("SELECT", OpenTelemetryMetricsCollector.operationNameForSql(cteSql, false));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(cteSql));
+		Assertions.assertEquals("BATCH INSERT", OpenTelemetryMetricsCollector.operationNameForSql(
+				"INSERT INTO widgets VALUES (:id)", true));
+		Assertions.assertEquals("BATCH", OpenTelemetryMetricsCollector.operationNameForSql("-- no operation", true));
+
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT * FROM widgets JOIN owners ON owners.id = widgets.owner_id"));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT * FROM widgets, owners"));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT * FROM generate_series(1, 5)"));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT (SELECT owner_id FROM owners LIMIT 1) FROM widgets"));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"INSERT INTO widgets (id) SELECT id FROM archived_widgets"));
+		Assertions.assertNull(OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT * FROM LATERAL generate_series(1, 5)"));
+		Assertions.assertEquals("widgets", OpenTelemetryMetricsCollector.collectionNameForSql(
+				"SELECT * FROM widgets; DELETE FROM credentials"));
+	}
+
+	@Test
+	public void cachesSqlClassificationsAndRetainsHashCollisions() throws Exception {
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withOpenTelemetry(OpenTelemetry.noop())
+				.recordCollectionName(true)
+				.build();
+		Method classificationMethod = OpenTelemetryMetricsCollector.class
+				.getDeclaredMethod("sqlClassificationFor", String.class);
+		classificationMethod.setAccessible(true);
+		String firstSql = "SELECT * FROM Aa";
+		String secondSql = "SELECT * FROM BB";
+		Assertions.assertEquals(firstSql.hashCode(), secondSql.hashCode());
+
+		Object firstClassification = classificationMethod.invoke(collector, firstSql);
+		Object secondClassification = classificationMethod.invoke(collector, secondSql);
+
+		Assertions.assertNotSame(firstClassification, secondClassification);
+		Assertions.assertSame(firstClassification, classificationMethod.invoke(collector, new String(firstSql)));
+		Assertions.assertSame(secondClassification, classificationMethod.invoke(collector, new String(secondSql)));
+	}
+
+	@Test
+	public void usesSemanticConventionHistogramBoundaries() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-boundaries"))
+				.build();
+		Database database = database("otel_boundaries", collector);
+
+		database.query("SELECT 1 FROM (VALUES (0))").fetchList(Integer.class);
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(List.of(0.001D, 0.005D, 0.01D, 0.05D, 0.1D, 0.5D, 1D, 5D, 10D),
+				firstHistogramPoint(metrics, "db.client.operation.duration").getBoundaries());
+		Assertions.assertEquals(List.of(1D, 2D, 5D, 10D, 20D, 50D, 100D, 200D, 500D, 1_000D, 2_000D, 5_000D, 10_000D),
+				firstHistogramPoint(metrics, "db.client.response.returned_rows").getBoundaries());
 	}
 
 	@Test
@@ -130,6 +230,63 @@ public class OpenTelemetryMetricsCollectorTests {
 				attributes -> "primary".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(3L, histogramTotalCount(metrics, "db.client.connection.use_time",
 				attributes -> "primary".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void recordsFailedBatchSizeAndBatchOperationName() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-failed-batch"))
+				.build();
+		Database database = database("otel_failed_batch", collector);
+
+		database.query("CREATE TABLE widgets (id INT PRIMARY KEY)").execute();
+		Assertions.assertThrows(DatabaseException.class, () -> database.query("INSERT INTO widgets VALUES (:id)")
+				.executeBatch(List.of(Map.of("id", 1), Map.of("id", 1))));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.statement.batch.size",
+				attributes -> "BATCH INSERT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.statement.errors",
+				attributes -> "BATCH INSERT".equals(attributes.get(DB_OPERATION_NAME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void recordsFullSqlStateAndUnderlyingSqlExceptionByDefault() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-error-attributes"))
+				.build();
+		Database database = database("otel_error_attributes", collector);
+
+		Assertions.assertThrows(DatabaseException.class, () -> database.query("SELECT id FROM missing_table").execute());
+
+		Attributes attributes = firstHistogramPoint(harness.metricReader().collectAllMetrics(),
+				"db.client.operation.duration").getAttributes();
+		String sqlState = attributes.get(DB_RESPONSE_STATUS_CODE_ATTRIBUTE_KEY);
+		String errorType = attributes.get(ERROR_TYPE_ATTRIBUTE_KEY);
+		Assertions.assertNotNull(sqlState);
+		Assertions.assertTrue(sqlState.length() > 2, sqlState);
+		Assertions.assertNotNull(errorType);
+		Assertions.assertTrue(errorType.startsWith("java.sql."), errorType);
+		Assertions.assertNotEquals(DatabaseException.class.getName(), errorType);
+	}
+
+	@Test
+	public void canReduceSqlStateToItsClass() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-sql-state-class"))
+				.recordFullSqlState(false)
+				.build();
+		Database database = database("otel_sql_state_class", collector);
+
+		Assertions.assertThrows(DatabaseException.class, () -> database.query("SELECT id FROM missing_table").execute());
+
+		String sqlState = firstHistogramPoint(harness.metricReader().collectAllMetrics(),
+				"db.client.operation.duration").getAttributes().get(DB_RESPONSE_STATUS_CODE_ATTRIBUTE_KEY);
+		Assertions.assertNotNull(sqlState);
+		Assertions.assertEquals(2, sqlState.length());
 	}
 
 	@Test
@@ -221,6 +378,32 @@ public class OpenTelemetryMetricsCollectorTests {
 	}
 
 	@Test
+	public void recordsTransactionClosureFailuresAndPostTransactionDurations() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-transaction-lifecycle"))
+				.build();
+		Database database = database("otel_transaction_lifecycle", collector);
+
+		database.transaction(() -> {
+			Transaction transaction = database.currentTransaction().orElseThrow();
+			transaction.addPostTransactionOperation(result -> {
+				// No-op
+			});
+			database.query("VALUES (1)").fetchList(Integer.class);
+		});
+		Assertions.assertThrows(IllegalStateException.class, () -> database.transaction(() -> {
+			throw new IllegalStateException("closure failed");
+		}));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.closure.duration",
+				attributes -> IllegalStateException.class.getName().equals(attributes.get(ERROR_TYPE_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.post_transaction.duration",
+				attributes -> "committed".equals(attributes.get(TRANSACTION_RESULT_ATTRIBUTE_KEY))));
+	}
+
+	@Test
 	public void activeGaugeReturnsToZeroAfterCommitFailureAndRollbackSuccess() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
@@ -274,7 +457,8 @@ public class OpenTelemetryMetricsCollectorTests {
 		Assertions.assertEquals(0L, longSumValueOrZero(metrics, "pyranid.transaction.active",
 				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.physical.begin_failures",
-				attributes -> "set_isolation".equals(attributes.get(TRANSACTION_BEGIN_PHASE_ATTRIBUTE_KEY))));
+				attributes -> "set_isolation".equals(attributes.get(TRANSACTION_BEGIN_PHASE_ATTRIBUTE_KEY))
+						&& "serializable".equals(attributes.get(TRANSACTION_ISOLATION_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.rollback.duration",
 				attributes -> "success".equals(attributes.get(TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY))));
 	}
@@ -317,9 +501,32 @@ public class OpenTelemetryMetricsCollectorTests {
 		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
 
 		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.fetchstream.duration",
-				attributes -> "open_failure".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))));
+				attributes -> "open_failure".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))
+						&& attributes.get(ERROR_TYPE_ATTRIBUTE_KEY) != null));
 		Assertions.assertEquals(0L, histogramTotalCountOrZero(metrics, "pyranid.fetchstream.rows_consumed",
 				attributes -> "open_failure".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void recordsStreamCallbackFailureType() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-stream-callback-failure"))
+				.build();
+		Database database = database("otel_stream_callback_failure", collector);
+
+		database.query("CREATE TABLE t (id INT)").execute();
+		database.query("INSERT INTO t VALUES (1)").execute();
+		Assertions.assertThrows(IllegalStateException.class, () -> database.query("SELECT id FROM t")
+				.fetchStream(Integer.class, stream -> {
+					stream.findFirst();
+					throw new IllegalStateException("consumer failed");
+				}));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.fetchstream.duration",
+				attributes -> "callback_failure".equals(attributes.get(STREAM_OUTCOME_ATTRIBUTE_KEY))
+						&& IllegalStateException.class.getName().equals(attributes.get(ERROR_TYPE_ATTRIBUTE_KEY))));
 	}
 
 	@Test
@@ -486,6 +693,14 @@ public class OpenTelemetryMetricsCollectorTests {
 						.mapToLong(HistogramPointData::getCount)
 						.sum())
 				.orElse(0L);
+	}
+
+	@NonNull
+	private static HistogramPointData firstHistogramPoint(@NonNull Collection<MetricData> metrics,
+																								@NonNull String metricName) {
+		return metricByName(metrics, metricName).getHistogramData().getPoints().stream()
+				.findFirst()
+				.orElseThrow();
 	}
 
 	@NonNull

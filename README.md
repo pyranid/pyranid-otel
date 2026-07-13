@@ -8,7 +8,7 @@ OpenTelemetry metrics integration for [Pyranid](https://www.pyranid.com).
 <dependency>
   <groupId>com.pyranid</groupId>
   <artifactId>pyranid-otel</artifactId>
-  <version>1.1.0</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 
@@ -30,7 +30,9 @@ Database database = Database.withDataSource(dataSource)
 
 `poolName(null)` or leaving it unset skips pool-name-gated connection metrics. `namespace(null)` omits `db.namespace`; no JDBC metadata lookup is performed by the builder. `recordCollectionName(false)` is the default and avoids table-name cardinality unless you opt in.
 
-When `recordCollectionName(true)` is enabled, `db.collection.name` is extracted with a lightweight SQL heuristic, not a full SQL parser. It works best for simple single-table `SELECT`, `INSERT`, `UPDATE`, and `DELETE` statements. Multi-table joins, CTEs, subqueries, aliases, schema-qualified names, and generated SQL may produce an incomplete or surprising collection name. Leading block and line comments are skipped before detecting `db.operation.name`.
+When `recordCollectionName(true)` is enabled, a conservative SQL lexer extracts `db.collection.name` for simple single-table `SELECT`, `INSERT`, `UPDATE`, and `DELETE` statements. It understands SQL comments, string literals, common quoted-string forms, quoted identifiers, and schema-qualified names. It omits the attribute for CTEs, subqueries, functions, joins, and other ambiguous forms instead of guessing. This remains an opt-in convenience, not a full dialect-specific SQL parser.
+
+Full SQLSTATE values are emitted as `db.response.status_code` by default. Use `recordFullSqlState(false)` to emit only the two-character SQLSTATE class. `error.type` prefers the underlying `SQLException` or deepest application cause when Pyranid wraps an error.
 
 ## Metrics
 
@@ -62,6 +64,7 @@ Pyranid-specific metrics:
 - `pyranid.fetchstream.duration`
 - `pyranid.fetchstream.rows_consumed`
 - `pyranid.post_transaction.operations`
+- `pyranid.post_transaction.duration`
 
 Pyranid does not synthesize pool-internal metrics such as idle counts, max connections, pending requests, timeouts, or create time. Those belong to the connection pool or proxy.
 
@@ -79,7 +82,7 @@ Pyranid does not synthesize pool-internal metrics such as idle counts, max conne
 | `ORACLE` | `oracle.db` |
 | `GENERIC` | `other_sql` |
 
-`db.operation.name` is the first SQL verb after leading SQL comments, uppercased. This adapter does not parse or normalize full SQL grammar.
+`db.operation.name` is the first SQL operation, uppercased. For CTEs, it reports the main operation after the CTE definitions. Batch operations report `BATCH <operation>`, or `BATCH` when no operation can be identified. For SQL containing multiple top-level statements, only the first statement is classified.
 
 ## Development Verification
 
@@ -90,7 +93,7 @@ mvn -q verify
 mvn -q javadoc:javadoc
 ```
 
-Artifact signing and Maven Central publishing are isolated in the `release` profile. Use `mvn -P release deploy` only when publishing a release or snapshot; normal local and CI `verify` runs do not require GPG credentials.
+Artifact signing and Maven Central publishing are isolated in the `release` profile. Use `mvn -P release deploy` only when publishing a release or snapshot; normal local and CI `verify` runs do not require GPG credentials. Automatic publishing is intentionally disabled: after deployment validation succeeds, review and publish the deployment in the Central Publisher Portal.
 
 ## Compatibility
 
@@ -101,6 +104,8 @@ The jar declares the automatic JPMS module name `com.pyranid.otel`.
 ## Notes
 
 `OpenTelemetryMetricsCollector.snapshot()` returns `Optional.empty()` because metrics are read through the OTel SDK/exporter pipeline.
+
+Builders resolve `GlobalOpenTelemetry` only when `build()` needs it. Supplying an explicit `Meter` or `OpenTelemetry` instance never initializes or freezes the global singleton.
 
 This adapter does not emit `Statement.id`, full SQL text, `db.query.text`, trace/span data, or arbitrary query parameters. Those values are user-controlled or high-cardinality and belong in tracing or custom instrumentation when needed. Custom collectors can still read the full `StatementContext`.
 
