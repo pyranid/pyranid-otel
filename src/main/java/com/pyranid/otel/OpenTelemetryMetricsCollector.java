@@ -47,8 +47,10 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 
@@ -59,6 +61,9 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * Standard database-client metrics use OpenTelemetry semantic-convention names directly. Pyranid-specific lifecycle
  * events use {@code pyranid.*} metric and attribute names.
+ * <p>
+ * Notification metrics use bounded lifecycle attributes. Channel names, payloads, notification-session identifiers,
+ * and backend process identifiers are never exported.
  * <p>
  * This implementation is thread-safe and expects the supplied {@link Meter} to be backed by a non-blocking exporter.
  * Pyranid core catches collector exceptions, but exporters that block can still stall the calling JDBC thread.
@@ -114,6 +119,10 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private static final AttributeKey<String> SAVEPOINT_OPERATION_ATTRIBUTE_KEY;
 	@NonNull
 	private static final AttributeKey<String> STREAM_OUTCOME_ATTRIBUTE_KEY;
+	@NonNull
+	private static final AttributeKey<String> NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY;
+	@NonNull
+	private static final AttributeKey<String> NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY;
 
 	static {
 		DEFAULT_INSTRUMENTATION_NAME = "com.pyranid.otel";
@@ -141,6 +150,8 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		TRANSACTION_ISOLATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.isolation");
 		SAVEPOINT_OPERATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.savepoint.operation");
 		STREAM_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.stream.outcome");
+		NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.notification.session.open_outcome");
+		NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.notification.session.outcome");
 	}
 
 	@NonNull
@@ -187,6 +198,18 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private final LongCounter postTransactionOperationsCounter;
 	@NonNull
 	private final DoubleHistogram postTransactionDurationHistogram;
+	@NonNull
+	private final DoubleHistogram notificationSessionOpenDurationHistogram;
+	@NonNull
+	private final DoubleHistogram notificationSessionDurationHistogram;
+	@NonNull
+	private final LongUpDownCounter activeNotificationSessionsCounter;
+	@NonNull
+	private final Map<UUID, Attributes> activeNotificationSessions;
+	@NonNull
+	private final LongHistogram notificationBatchSizeHistogram;
+	@NonNull
+	private final LongCounter notificationConnectionLossesCounter;
 	@Nullable
 	private final String poolName;
 	@Nullable
@@ -354,6 +377,28 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		this.postTransactionDurationHistogram = meter.histogramBuilder("pyranid.post_transaction.duration")
 				.setDescription("Duration of post-transaction operations.")
 				.setUnit("s")
+				.build();
+		this.notificationSessionOpenDurationHistogram = meter.histogramBuilder("pyranid.notification.session.open.duration")
+				.setDescription("Duration of notification-session opening attempts.")
+				.setUnit("s")
+				.build();
+		this.notificationSessionDurationHistogram = meter.histogramBuilder("pyranid.notification.session.duration")
+				.setDescription("Duration of opened notification sessions, including cleanup.")
+				.setUnit("s")
+				.build();
+		this.activeNotificationSessionsCounter = meter.upDownCounterBuilder("pyranid.notification.session.active")
+				.setDescription("Number of active notification sessions.")
+				.setUnit("{session}")
+				.build();
+		this.activeNotificationSessions = new ConcurrentHashMap<>();
+		this.notificationBatchSizeHistogram = meter.histogramBuilder("pyranid.notification.batch.size")
+				.ofLongs()
+				.setDescription("Number of notifications delivered to application code in a batch.")
+				.setUnit("{notification}")
+				.build();
+		this.notificationConnectionLossesCounter = meter.counterBuilder("pyranid.notification.connection.losses")
+				.setDescription("Total number of terminal notification-connection losses.")
+				.setUnit("{connection}")
 				.build();
 	}
 
@@ -596,6 +641,70 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	}
 
 	@Override
+	public void willOpenNotificationSession(@NonNull DatabaseType databaseType,
+																						@NonNull UUID notificationSessionId) {
+		// The matching callbacks supply the authoritative duration and outcome; there is no metric to record yet.
+		requireNonNull(databaseType);
+		requireNonNull(notificationSessionId);
+	}
+
+	@Override
+	public void didOpenNotificationSession(@NonNull DatabaseType databaseType,
+																					 @NonNull UUID notificationSessionId,
+																					 @NonNull Duration openDuration) {
+		requireNonNull(openDuration);
+		markNotificationSessionActive(databaseType, notificationSessionId);
+		this.notificationSessionOpenDurationHistogram.record(seconds(openDuration),
+				notificationAttributes(databaseType, NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY, OUTCOME_SUCCESS, null));
+	}
+
+	@Override
+	public void didFailToOpenNotificationSession(@NonNull DatabaseType databaseType,
+																						 @NonNull UUID notificationSessionId,
+																						 @NonNull Duration openDuration,
+																						 @NonNull Throwable throwable) {
+		requireNonNull(notificationSessionId);
+		requireNonNull(openDuration);
+		requireNonNull(throwable);
+		this.notificationSessionOpenDurationHistogram.record(seconds(openDuration),
+				notificationAttributes(databaseType, NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY, OUTCOME_FAILURE, throwable));
+	}
+
+	@Override
+	public void didDeliverNotificationBatch(@NonNull DatabaseType databaseType,
+																						@NonNull UUID notificationSessionId,
+																						@NonNull Long notificationCount) {
+		requireNonNull(notificationSessionId);
+		this.notificationBatchSizeHistogram.record(requireNonNull(notificationCount), notificationAttributes(databaseType));
+	}
+
+	@Override
+	public void didLoseNotificationConnection(@NonNull DatabaseType databaseType,
+																							@NonNull UUID notificationSessionId,
+																							@NonNull Throwable throwable) {
+		requireNonNull(notificationSessionId);
+		this.notificationConnectionLossesCounter.add(1,
+				notificationAttributes(databaseType, null, null, requireNonNull(throwable)));
+	}
+
+	@Override
+	public void didCloseNotificationSession(@NonNull DatabaseType databaseType,
+																						 @NonNull UUID notificationSessionId,
+																						 @NonNull NotificationSessionOutcome outcome,
+																						 @NonNull Duration sessionDuration,
+																						 @Nullable Throwable throwable) {
+		requireNonNull(outcome);
+		requireNonNull(sessionDuration);
+
+		try {
+			this.notificationSessionDurationHistogram.record(seconds(sessionDuration),
+					notificationAttributes(databaseType, NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY, enumValue(outcome), throwable));
+		} finally {
+			markNotificationSessionInactive(notificationSessionId);
+		}
+	}
+
+	@Override
 	public void didRunPostTransactionOperation(@NonNull Transaction transaction,
 																						 @NonNull TransactionResult result,
 																						 @NonNull DatabaseType databaseType,
@@ -654,6 +763,64 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 	private Attributes databaseAttributes(@NonNull DatabaseType databaseType) {
 		requireNonNull(databaseType);
 		return Attributes.of(DB_SYSTEM_NAME_ATTRIBUTE_KEY, dbSystemName(databaseType));
+	}
+
+	@NonNull
+	private Attributes notificationAttributes(@NonNull DatabaseType databaseType) {
+		return notificationAttributes(databaseType, null, null, null);
+	}
+
+	@NonNull
+	private Attributes notificationAttributes(@NonNull DatabaseType databaseType,
+																						@Nullable AttributeKey<String> outcomeAttributeKey,
+																						@Nullable String outcome,
+																						@Nullable Throwable throwable) {
+		AttributesBuilder builder = Attributes.builder().putAll(databaseAttributes(databaseType));
+
+		if (this.namespace != null)
+			builder.put(DB_NAMESPACE_ATTRIBUTE_KEY, this.namespace);
+
+		if (this.poolName != null)
+			builder.put(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY, this.poolName);
+
+		if (outcomeAttributeKey != null)
+			builder.put(outcomeAttributeKey, requireNonNull(outcome));
+
+		if (throwable != null)
+			builder.put(ERROR_TYPE_ATTRIBUTE_KEY, errorType(throwable));
+
+		return builder.build();
+	}
+
+	private void markNotificationSessionActive(@NonNull DatabaseType databaseType,
+																								@NonNull UUID notificationSessionId) {
+		requireNonNull(notificationSessionId);
+		Attributes attributes = notificationAttributes(databaseType);
+
+		if (this.activeNotificationSessions.putIfAbsent(notificationSessionId, attributes) != null)
+			return;
+
+		try {
+			this.activeNotificationSessionsCounter.add(1, attributes);
+		} catch (RuntimeException | Error throwable) {
+			this.activeNotificationSessions.remove(notificationSessionId, attributes);
+			throw throwable;
+		}
+	}
+
+	private void markNotificationSessionInactive(@NonNull UUID notificationSessionId) {
+		requireNonNull(notificationSessionId);
+		Attributes attributes = this.activeNotificationSessions.remove(notificationSessionId);
+
+		if (attributes == null)
+			return;
+
+		try {
+			this.activeNotificationSessionsCounter.add(-1, attributes);
+		} catch (RuntimeException | Error throwable) {
+			this.activeNotificationSessions.putIfAbsent(notificationSessionId, attributes);
+			throw throwable;
+		}
 	}
 
 	private void markPhysicalTransactionActive(@NonNull Transaction transaction,
@@ -1442,10 +1609,10 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 		}
 
 		/**
-		 * Sets the database connection pool name used for pool-name-gated connection metrics.
+		 * Sets the database connection pool name to emit as {@code db.client.connection.pool.name}.
 		 * <p>
 		 * When unset or {@code null}, {@code db.client.connection.wait_time} and
-		 * {@code db.client.connection.use_time} are not emitted.
+		 * {@code db.client.connection.use_time} are not emitted, and notification metrics omit the pool-name attribute.
 		 *
 		 * @param poolName pool name, or {@code null}
 		 * @return this builder

@@ -2,6 +2,20 @@
 
 All notable changes to Pyranid's OpenTelemetry Integration will be documented in this file.
 
+## 1.3.0-SNAPSHOT
+
+### Added
+
+- Added notification-session open duration, total duration, and active-session metrics for Pyranid 4.6.0 notification listeners.
+- Added delivered notification-batch size and terminal notification-connection loss metrics.
+- Added bounded notification open and terminal outcome attributes. Failure metrics include `error.type`; channel names, payloads, session identifiers, and backend process identifiers are never exported.
+
+### Changed
+
+- Updated the provided Pyranid dependency to `4.6.0-SNAPSHOT`.
+- Updated the OpenTelemetry Java BOM to `1.64.0`.
+- Configured namespace and pool names are included on notification metrics when present. Notification sends continue through the ordinary statement metrics.
+
 ## 1.2.0
 
 ### Fixed

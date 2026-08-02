@@ -47,10 +47,12 @@ import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -78,6 +80,8 @@ public class OpenTelemetryMetricsCollectorTests {
 	private static final AttributeKey<String> TRANSACTION_ISOLATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.transaction.isolation");
 	private static final AttributeKey<String> SAVEPOINT_OPERATION_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.savepoint.operation");
 	private static final AttributeKey<String> STREAM_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.stream.outcome");
+	private static final AttributeKey<String> NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.notification.session.open_outcome");
+	private static final AttributeKey<String> NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY = AttributeKey.stringKey("pyranid.notification.session.outcome");
 
 	@Test
 	public void testDbSystemNameCoversEveryDatabaseType() {
@@ -579,6 +583,119 @@ public class OpenTelemetryMetricsCollectorTests {
 				attributes -> "released".equals(attributes.get(SAVEPOINT_OPERATION_ATTRIBUTE_KEY))));
 	}
 
+	@Test
+	public void recordsNotificationMetricsWithBoundedAttributes() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-notifications"))
+				.poolName("listener")
+				.namespace("orders")
+				.build();
+		UUID failedSessionId = UUID.randomUUID();
+		UUID returnedSessionId = UUID.randomUUID();
+		UUID interruptedSessionId = UUID.randomUUID();
+		SQLException connectionFailure = new SQLException("connection lost", "08006");
+
+		collector.willOpenNotificationSession(DatabaseType.POSTGRESQL, failedSessionId);
+		collector.didOpenNotificationSession(DatabaseType.POSTGRESQL, failedSessionId, Duration.ofMillis(20));
+		collector.didDeliverNotificationBatch(DatabaseType.POSTGRESQL, failedSessionId, 3L);
+		collector.didLoseNotificationConnection(DatabaseType.POSTGRESQL, failedSessionId, connectionFailure);
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, failedSessionId,
+				MetricsCollector.NotificationSessionOutcome.FAILED, Duration.ofSeconds(2), connectionFailure);
+
+		collector.willOpenNotificationSession(DatabaseType.POSTGRESQL, returnedSessionId);
+		collector.didOpenNotificationSession(DatabaseType.POSTGRESQL, returnedSessionId, Duration.ofMillis(10));
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, returnedSessionId,
+				MetricsCollector.NotificationSessionOutcome.CALLBACK_RETURNED, Duration.ofSeconds(1), null);
+
+		collector.willOpenNotificationSession(DatabaseType.POSTGRESQL, interruptedSessionId);
+		collector.didOpenNotificationSession(DatabaseType.POSTGRESQL, interruptedSessionId, Duration.ofMillis(15));
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, interruptedSessionId,
+				MetricsCollector.NotificationSessionOutcome.INTERRUPTED, Duration.ofMillis(500), null);
+
+		collector.didFailToOpenNotificationSession(DatabaseType.POSTGRESQL, UUID.randomUUID(),
+				Duration.ofMillis(30), new IllegalStateException("open failed"));
+
+		Collection<MetricData> metrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(3L, histogramCount(metrics, "pyranid.notification.session.open.duration",
+				attributes -> "success".equals(attributes.get(NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(0.045D, histogramSum(metrics, "pyranid.notification.session.open.duration",
+				attributes -> "success".equals(attributes.get(NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY))), 0.000_000_001D);
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.notification.session.open.duration",
+				attributes -> "failure".equals(attributes.get(NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY))
+						&& IllegalStateException.class.getName().equals(attributes.get(ERROR_TYPE_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(0.03D, histogramSum(metrics, "pyranid.notification.session.open.duration",
+				attributes -> "failure".equals(attributes.get(NOTIFICATION_SESSION_OPEN_OUTCOME_ATTRIBUTE_KEY))), 0.000_000_001D);
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.notification.session.duration",
+				attributes -> "failed".equals(attributes.get(NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY))
+						&& SQLException.class.getName().equals(attributes.get(ERROR_TYPE_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(2D, histogramSum(metrics, "pyranid.notification.session.duration",
+				attributes -> "failed".equals(attributes.get(NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY))), 0.000_000_001D);
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.notification.session.duration",
+				attributes -> "callback_returned".equals(attributes.get(NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY))
+						&& attributes.get(ERROR_TYPE_ATTRIBUTE_KEY) == null));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.notification.session.duration",
+				attributes -> "interrupted".equals(attributes.get(NOTIFICATION_SESSION_OUTCOME_ATTRIBUTE_KEY))
+						&& attributes.get(ERROR_TYPE_ATTRIBUTE_KEY) == null));
+		Assertions.assertEquals(0L, longSumValue(metrics, "pyranid.notification.session.active",
+				attributes -> "postgresql".equals(attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.notification.batch.size",
+				attributes -> "listener".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(3D, histogramSum(metrics, "pyranid.notification.batch.size",
+				attributes -> "listener".equals(attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY))));
+		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.notification.connection.losses",
+				attributes -> SQLException.class.getName().equals(attributes.get(ERROR_TYPE_ATTRIBUTE_KEY))));
+
+		Assertions.assertEquals("s", metricByName(metrics, "pyranid.notification.session.open.duration").getUnit());
+		Assertions.assertEquals("s", metricByName(metrics, "pyranid.notification.session.duration").getUnit());
+		Assertions.assertEquals("{session}", metricByName(metrics, "pyranid.notification.session.active").getUnit());
+		Assertions.assertEquals("{notification}", metricByName(metrics, "pyranid.notification.batch.size").getUnit());
+		Assertions.assertEquals("{connection}", metricByName(metrics, "pyranid.notification.connection.losses").getUnit());
+
+		for (String metricName : List.of("pyranid.notification.session.open.duration",
+				"pyranid.notification.session.duration", "pyranid.notification.batch.size")) {
+			MetricData metric = metricByName(metrics, metricName);
+			metric.getHistogramData().getPoints().forEach(point -> assertBoundedNotificationAttributes(point.getAttributes()));
+		}
+
+		for (String metricName : List.of("pyranid.notification.session.active",
+				"pyranid.notification.connection.losses"))
+			metricByName(metrics, metricName).getLongSumData().getPoints()
+					.forEach(point -> assertBoundedNotificationAttributes(point.getAttributes()));
+
+		Assertions.assertTrue(collector.snapshot().isEmpty());
+		Assertions.assertTrue(collector.notificationSnapshot().isEmpty());
+	}
+
+	@Test
+	public void balancesActiveNotificationSessionsBySessionId() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-notification-active"))
+				.build();
+		UUID notificationSessionId = UUID.randomUUID();
+
+		collector.didOpenNotificationSession(DatabaseType.POSTGRESQL, notificationSessionId, Duration.ZERO);
+		collector.didOpenNotificationSession(DatabaseType.POSTGRESQL, notificationSessionId, Duration.ZERO);
+		Collection<MetricData> activeMetrics = harness.metricReader().collectAllMetrics();
+		Assertions.assertEquals(1L, longSumValue(activeMetrics,
+				"pyranid.notification.session.active", attributes -> true));
+		Attributes activeAttributes = metricByName(activeMetrics, "pyranid.notification.session.active")
+				.getLongSumData().getPoints().stream().findFirst().orElseThrow().getAttributes();
+		Assertions.assertNull(activeAttributes.get(DB_NAMESPACE_ATTRIBUTE_KEY));
+		Assertions.assertNull(activeAttributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY));
+
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, notificationSessionId,
+				MetricsCollector.NotificationSessionOutcome.CALLBACK_RETURNED, Duration.ZERO, null);
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, notificationSessionId,
+				MetricsCollector.NotificationSessionOutcome.CALLBACK_RETURNED, Duration.ZERO, null);
+		collector.didCloseNotificationSession(DatabaseType.POSTGRESQL, UUID.randomUUID(),
+				MetricsCollector.NotificationSessionOutcome.CALLBACK_RETURNED, Duration.ZERO, null);
+
+		Assertions.assertEquals(0L, longSumValue(harness.metricReader().collectAllMetrics(),
+				"pyranid.notification.session.active", attributes -> true));
+	}
+
 	@NonNull
 	private static Database database(@NonNull String name,
 																	 @NonNull OpenTelemetryMetricsCollector collector) {
@@ -693,6 +810,28 @@ public class OpenTelemetryMetricsCollectorTests {
 						.mapToLong(HistogramPointData::getCount)
 						.sum())
 				.orElse(0L);
+	}
+
+	private static double histogramSum(Collection<MetricData> metrics,
+																	 String metricName,
+																	 java.util.function.Predicate<Attributes> attributesMatcher) {
+		return metricByName(metrics, metricName).getHistogramData().getPoints().stream()
+				.filter(point -> attributesMatcher.test(point.getAttributes()))
+				.mapToDouble(HistogramPointData::getSum)
+				.findFirst()
+				.orElseThrow();
+	}
+
+	private static void assertBoundedNotificationAttributes(@NonNull Attributes attributes) {
+		Set<String> attributeNames = attributes.asMap().keySet().stream()
+				.map(AttributeKey::getKey)
+				.collect(Collectors.toSet());
+		Assertions.assertTrue(Set.of("db.system.name", "db.namespace", "db.client.connection.pool.name",
+				"pyranid.notification.session.open_outcome", "pyranid.notification.session.outcome", "error.type")
+				.containsAll(attributeNames), attributeNames.toString());
+		Assertions.assertEquals("postgresql", attributes.get(DB_SYSTEM_NAME_ATTRIBUTE_KEY));
+		Assertions.assertEquals("orders", attributes.get(DB_NAMESPACE_ATTRIBUTE_KEY));
+		Assertions.assertEquals("listener", attributes.get(DB_CLIENT_CONNECTION_POOL_NAME_ATTRIBUTE_KEY));
 	}
 
 	@NonNull

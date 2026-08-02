@@ -15,7 +15,7 @@
  */
 
 /**
- * OpenTelemetry metrics support for Pyranid.
+ * OpenTelemetry metrics support for Pyranid database operations and notification sessions.
  *
  * @since 1.0.0
  */

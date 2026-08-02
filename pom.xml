@@ -6,7 +6,7 @@
 
 	<groupId>com.pyranid</groupId>
 	<artifactId>pyranid-otel</artifactId>
-	<version>1.2.0</version>
+	<version>1.3.0-SNAPSHOT</version>
 	<packaging>jar</packaging>
 	<name>Pyranid OpenTelemetry Integration</name>
 	<description>OpenTelemetry metrics integration for Pyranid.</description>
@@ -48,17 +48,30 @@
 		</repository>
 	</distributionManagement>
 
+	<repositories>
+		<repository>
+			<id>central-portal-snapshots</id>
+			<url>https://central.sonatype.com/repository/maven-snapshots/</url>
+			<releases>
+				<enabled>false</enabled>
+			</releases>
+			<snapshots>
+				<enabled>true</enabled>
+			</snapshots>
+		</repository>
+	</repositories>
+
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-		<project.build.outputTimestamp>2026-07-13T00:00:00Z</project.build.outputTimestamp>
-		<pyranid.version>4.4.0</pyranid.version>
-		<opentelemetry.version>1.61.0</opentelemetry.version>
-		<junit.version>5.13.3</junit.version>
+		<project.build.outputTimestamp>2026-08-01T00:00:00Z</project.build.outputTimestamp>
+		<pyranid.version>4.6.0-SNAPSHOT</pyranid.version>
+		<opentelemetry.version>1.64.0</opentelemetry.version>
+		<junit.version>6.1.2</junit.version>
 		<hsqldb.version>2.7.4</hsqldb.version>
-		<maven.enforcer.plugin.version>3.6.2</maven.enforcer.plugin.version>
+		<maven.enforcer.plugin.version>3.6.3</maven.enforcer.plugin.version>
 		<japicmp.maven.plugin.version>0.26.1</japicmp.maven.plugin.version>
-		<japicmp.baseline.version>1.1.0</japicmp.baseline.version>
+		<japicmp.baseline.version>1.2.0</japicmp.baseline.version>
 	</properties>
 
 	<dependencyManagement>
@@ -154,7 +167,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
-				<version>3.14.0</version>
+				<version>3.15.0</version>
 				<configuration>
 					<release>17</release>
 					<compilerArgs>
@@ -170,7 +183,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-source-plugin</artifactId>
-				<version>3.3.1</version>
+				<version>3.4.0</version>
 				<executions>
 					<execution>
 						<id>attach-sources</id>
@@ -184,7 +197,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-jar-plugin</artifactId>
-				<version>3.4.2</version>
+				<version>3.5.1</version>
 				<configuration>
 					<archive>
 						<manifest>
@@ -230,7 +243,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
-				<version>3.5.4</version>
+				<version>3.5.6</version>
 				<configuration>
 					<includes>
 						<include>**/*Tests.java</include>
@@ -257,7 +270,7 @@
 		<dependency>
 			<groupId>org.jspecify</groupId>
 			<artifactId>jspecify</artifactId>
-			<version>1.0.0</version>
+			<version>1.0.1</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
