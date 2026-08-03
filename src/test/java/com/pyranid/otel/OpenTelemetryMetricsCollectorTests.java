@@ -444,7 +444,7 @@ public class OpenTelemetryMetricsCollectorTests {
 	}
 
 	@Test
-	public void activeGaugeReturnsToZeroAfterCommitFailureAndRollbackSuccess() {
+	public void activeGaugeReturnsToZeroAfterCommitSerializationFailureAndRollbackSuccess() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
 				.withMeter(harness.openTelemetrySdk().getMeter("test-commit-failure"))
@@ -470,7 +470,7 @@ public class OpenTelemetryMetricsCollectorTests {
 		Assertions.assertEquals(1L, histogramCount(metrics, "pyranid.transaction.rollback.duration",
 				attributes -> "success".equals(attributes.get(TRANSACTION_ROLLBACK_OUTCOME_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.count",
-				attributes -> "failed".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
+				attributes -> "rolled_back".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
 	}
 
 	@Test

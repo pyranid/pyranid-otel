@@ -30,18 +30,6 @@ jobs:
           java-version: ${{ matrix.jdk }}
           cache: maven
 
-      # Remove this bootstrap after the dependency moves from 4.6.0-SNAPSHOT to the published 4.6.0 release.
-      - name: Check out Pyranid 4.6 snapshot
-        uses: actions/checkout@v7
-        with:
-          repository: pyranid/pyranid
-          ref: feature/4.6.0
-          path: .pyranid-core
-
-      - name: Install Pyranid 4.6 snapshot
-        working-directory: .pyranid-core
-        run: mvn -B -ntp -DskipTests install
-
       - name: Verify
         run: mvn -B -ntp verify
 
