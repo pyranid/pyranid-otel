@@ -478,14 +478,22 @@ public final class OpenTelemetryMetricsCollector implements MetricsCollector {
 
 	@Override
 	public void didExitTransactionClosure(@NonNull Transaction transaction,
-															@NonNull TransactionClosureOutcome outcome,
-															@NonNull DatabaseType databaseType,
-															@NonNull Duration logicalDuration,
-															@Nullable Throwable thrown) {
-		requireNonNull(outcome);
-		Attributes attributes = transactionClosureAttributes(databaseType, transaction.getTransactionIsolation(), outcome, thrown);
-		this.transactionClosureDurationHistogram.record(seconds(logicalDuration), attributes);
-		this.transactionCountCounter.add(1, attributes);
+																@NonNull TransactionClosureOutcome outcome,
+																@NonNull DatabaseType databaseType,
+																@NonNull Duration logicalDuration,
+																@Nullable Throwable thrown) {
+		requireNonNull(transaction);
+		requireNonNull(databaseType);
+
+		try {
+			requireNonNull(outcome);
+			Attributes attributes = transactionClosureAttributes(databaseType, transaction.getTransactionIsolation(), outcome, thrown);
+			this.transactionClosureDurationHistogram.record(seconds(logicalDuration), attributes);
+			this.transactionCountCounter.add(1, attributes);
+		} finally {
+			// This is an idempotent fallback when a physical commit/rollback callback is absent or cannot finish.
+			markPhysicalTransactionInactive(transaction, databaseType);
+		}
 	}
 
 	@Override

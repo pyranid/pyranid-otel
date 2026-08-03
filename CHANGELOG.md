@@ -10,8 +10,13 @@ All notable changes to Pyranid's OpenTelemetry Integration will be documented in
 - Added delivered notification-batch size and terminal notification-connection loss metrics.
 - Added bounded notification open and terminal outcome attributes. Failure metrics include `error.type`; channel names, payloads, session identifiers, and backend process identifiers are never exported.
 
+### Fixed
+
+- Ensured active-transaction metrics and internal state are drained at logical transaction exit if a physical terminal callback is absent or cannot finish.
+
 ### Changed
 
+- Pyranid `4.6.0` is now required. Because Pyranid remains a `provided` dependency, applications must upgrade both artifacts together.
 - Updated the provided Pyranid dependency to `4.6.0-SNAPSHOT`.
 - Updated the OpenTelemetry Java BOM to `1.64.0`.
 - Configured namespace and pool names are included on notification metrics when present. Notification sends continue through the ordinary statement metrics.

@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -379,6 +380,41 @@ public class OpenTelemetryMetricsCollectorTests {
 				attributes -> "success".equals(attributes.get(TRANSACTION_COMMIT_OUTCOME_ATTRIBUTE_KEY))));
 		Assertions.assertEquals(1L, longSumValue(metrics, "pyranid.transaction.count",
 				attributes -> "committed".equals(attributes.get(TRANSACTION_CLOSURE_OUTCOME_ATTRIBUTE_KEY))));
+	}
+
+	@Test
+	public void transactionExitDrainsActiveStateWithoutPhysicalTerminalCallback() {
+		TestHarness harness = TestHarness.create();
+		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
+				.withMeter(harness.openTelemetrySdk().getMeter("test-transaction-exit-fallback"))
+				.build();
+		Database database = database("otel_transaction_exit_fallback", collector);
+		AtomicReference<Transaction> transactionReference = new AtomicReference<>();
+
+		database.transaction(() -> transactionReference.set(database.currentTransaction().orElseThrow()));
+		Transaction transaction = transactionReference.get();
+		collector.didBeginPhysicalTransaction(
+				transaction, transaction.getTransactionIsolation(), DatabaseType.POSTGRESQL);
+
+		Assertions.assertEquals(1L, longSumValue(harness.metricReader().collectAllMetrics(),
+				"pyranid.transaction.active", attributes -> true));
+
+		collector.didExitTransactionClosure(transaction, MetricsCollector.TransactionClosureOutcome.FAILED,
+				DatabaseType.POSTGRESQL, Duration.ZERO, new IllegalStateException("terminal callback missing"));
+
+		Assertions.assertEquals(0L, longSumValue(harness.metricReader().collectAllMetrics(),
+				"pyranid.transaction.active", attributes -> true));
+
+		// Reusing the same identity proves logical exit removed it from the strong-reference set rather than only
+		// compensating the exported counter. A retained entry would suppress this second increment.
+		collector.didBeginPhysicalTransaction(
+				transaction, transaction.getTransactionIsolation(), DatabaseType.POSTGRESQL);
+		Assertions.assertEquals(1L, longSumValue(harness.metricReader().collectAllMetrics(),
+				"pyranid.transaction.active", attributes -> true));
+
+		collector.didRollbackPhysicalTransaction(transaction, DatabaseType.POSTGRESQL, Duration.ZERO);
+		Assertions.assertEquals(0L, longSumValue(harness.metricReader().collectAllMetrics(),
+				"pyranid.transaction.active", attributes -> true));
 	}
 
 	@Test

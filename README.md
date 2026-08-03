@@ -110,20 +110,9 @@ All five notification metrics include `db.system.name`. They also include the co
 
 `db.operation.name` is the first SQL operation, uppercased. For CTEs, it reports the main operation after the CTE definitions. Batch operations report `BATCH <operation>`, or `BATCH` when no operation can be identified. For SQL containing multiple top-level statements, only the first statement is classified.
 
-## Development Verification
-
-From the `pyranid-otel/` project directory, run:
-
-```bash
-mvn -q verify
-mvn -q javadoc:javadoc
-```
-
-Artifact signing and Maven Central publishing are isolated in the `release` profile. Use `mvn -P release deploy` only when publishing a release or snapshot; normal local and CI `verify` runs do not require GPG credentials. Automatic publishing is intentionally disabled: after deployment validation succeeds, review and publish the deployment in the Central Publisher Portal.
-
 ## Compatibility
 
-This snapshot depends on Pyranid `4.6.0-SNAPSHOT` and pins OpenTelemetry Java BOM `1.64.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
+This implementation pins OpenTelemetry Java BOM `1.64.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
 
 The jar declares the automatic JPMS module name `com.pyranid.otel`.
 
