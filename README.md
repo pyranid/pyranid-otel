@@ -19,7 +19,7 @@ an implementation of Pyranid's
 
 Create a collector with
 [`OpenTelemetryMetricsCollector::withOpenTelemetry(...)`](https://otel.javadoc.pyranid.com/com/pyranid/otel/OpenTelemetryMetricsCollector.html#withOpenTelemetry(io.opentelemetry.api.OpenTelemetry)) by supplying an
-[`OpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.64.0/io/opentelemetry/api/OpenTelemetry.html)
+[`OpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.67.0/io/opentelemetry/api/OpenTelemetry.html)
 instance, then configure it with
 [`Database.Builder::metricsCollector(...)`](https://javadoc.pyranid.com/com/pyranid/Database.Builder.html#metricsCollector(com.pyranid.MetricsCollector)):
 
@@ -112,7 +112,7 @@ All five notification metrics include `db.system.name`. They also include the co
 
 ## Compatibility
 
-This implementation pins OpenTelemetry Java BOM `1.64.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
+This implementation pins OpenTelemetry Java BOM `1.67.0`. Future minor releases may bump the OTel BOM when database semantic conventions or instrument behavior changes.
 
 The jar declares the automatic JPMS module name `com.pyranid.otel`.
 
@@ -120,10 +120,24 @@ The jar declares the automatic JPMS module name `com.pyranid.otel`.
 
 [`OpenTelemetryMetricsCollector::snapshot()`](https://otel.javadoc.pyranid.com/com/pyranid/otel/OpenTelemetryMetricsCollector.html#snapshot()) and the inherited [`MetricsCollector::notificationSnapshot()`](https://javadoc.pyranid.com/com/pyranid/MetricsCollector.html#notificationSnapshot()) return [`Optional.empty()`](https://docs.oracle.com/en/java/javase/26/docs/api/java.base/java/util/Optional.html#empty()) because metrics are read through the OTel SDK/exporter pipeline.
 
-Builders resolve [`GlobalOpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.64.0/io/opentelemetry/api/GlobalOpenTelemetry.html) only when [`build()`](https://otel.javadoc.pyranid.com/com/pyranid/otel/OpenTelemetryMetricsCollector.Builder.html#build()) needs it. Supplying an explicit [`Meter`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.64.0/io/opentelemetry/api/metrics/Meter.html) or [`OpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.64.0/io/opentelemetry/api/OpenTelemetry.html) instance never initializes or freezes the global singleton.
+Builders resolve [`GlobalOpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.67.0/io/opentelemetry/api/GlobalOpenTelemetry.html) only when [`build()`](https://otel.javadoc.pyranid.com/com/pyranid/otel/OpenTelemetryMetricsCollector.Builder.html#build()) needs it. Supplying an explicit [`Meter`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.67.0/io/opentelemetry/api/metrics/Meter.html) or [`OpenTelemetry`](https://javadoc.io/static/io.opentelemetry/opentelemetry-api/1.67.0/io/opentelemetry/api/OpenTelemetry.html) instance never initializes or freezes the global singleton.
 
 This adapter does not emit [`Statement::getId()`](https://javadoc.pyranid.com/com/pyranid/Statement.html#getId()), full SQL text, `db.query.text`, trace/span data, or arbitrary query parameters. Those values are user-controlled or high-cardinality and belong in tracing or custom instrumentation when needed. Custom collectors can still read the full [`StatementContext`](https://javadoc.pyranid.com/com/pyranid/StatementContext.html).
 
 `db.client.connection.use_time` measures connection hold time, not exact physical transaction lifetime. It includes transaction setup and cleanup around the commit/rollback operation.
 
 `pyranid.transaction.active` increments when a physical JDBC transaction begins and decrements once at the terminal physical transaction outcome. Commit failure is not terminal by itself because Pyranid attempts rollback afterward; the rollback callback owns the single decrement. Physical-begin failures do not decrement unless the transaction was first recorded as active.
+
+### Testing against the 4.8.0 core candidate
+
+The adapter still declares Pyranid 4.6.0 as its minimum. After installing core `4.8.0-SNAPSHOT` locally,
+run `mvn -Pcore-candidate verify` to test the same adapter against the candidate. Also run the default
+`mvn verify` to retain coverage of the minimum supported core. No new core API is required by the adapter.
+
+`db.client.operation.duration` continues to use `StatementLog.getTotalDuration()`, the sum of active
+connection acquisition, preparation, execution, and mapping phases. Core 4.8.0's optional
+`getElapsedDuration()` is a separate diagnostic and does not redefine that metric.
+
+Database types added after the adapter's core baseline retain the documented `other_sql` fallback. In this
+adapter version that includes DuckDB from newer core releases. Candidate verification explicitly checks that
+fallback; adding a dedicated DuckDB attribute value is a separate adapter change.

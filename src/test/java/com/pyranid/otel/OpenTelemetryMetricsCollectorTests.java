@@ -96,12 +96,17 @@ public class OpenTelemetryMetricsCollectorTests {
 		Assertions.assertEquals("oracle.db", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.ORACLE));
 		Assertions.assertEquals("other_sql", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.GENERIC));
 
+		// The adapter's declared core floor is 4.6.0. New enum values in a candidate core must exercise
+		// the documented fallback, not force a raised minimum or a change in exported metric attributes.
+		java.util.Set<DatabaseType> explicitlyMapped = java.util.EnumSet.of(DatabaseType.POSTGRESQL,
+				DatabaseType.MYSQL, DatabaseType.MARIA_DB, DatabaseType.SQLITE, DatabaseType.SQL_SERVER, DatabaseType.ORACLE);
 		for (DatabaseType databaseType : DatabaseType.values()) {
 			String dbSystemName = OpenTelemetryMetricsCollector.dbSystemName(databaseType);
 			Assertions.assertNotNull(dbSystemName, "db.system.name must be non-null for " + databaseType);
-			if (databaseType != DatabaseType.GENERIC)
-				Assertions.assertNotEquals("other_sql", dbSystemName,
-						databaseType + " should map to a specific db.system.name, not the generic fallback");
+			if (explicitlyMapped.contains(databaseType))
+				Assertions.assertNotEquals("other_sql", dbSystemName);
+			else
+				Assertions.assertEquals("other_sql", dbSystemName, "Unmapped types retain the forward-compatible fallback");
 		}
 	}
 

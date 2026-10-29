@@ -18,7 +18,7 @@ All notable changes to Pyranid's OpenTelemetry Integration will be documented in
 
 - Pyranid `4.6.0` is now required. Because Pyranid remains a `provided` dependency, applications must upgrade both artifacts together.
 - Updated the provided Pyranid dependency to `4.6.0`.
-- Updated the OpenTelemetry Java BOM to `1.64.0`.
+- Updated the OpenTelemetry Java BOM to `1.67.0`.
 - Configured namespace and pool names are included on notification metrics when present. Notification sends continue through the ordinary statement metrics.
 
 ## 1.2.0
