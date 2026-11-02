@@ -6,7 +6,7 @@
 
 	<groupId>com.pyranid</groupId>
 	<artifactId>pyranid-otel</artifactId>
-	<version>1.3.0</version>
+	<version>1.4.0</version>
 	<packaging>jar</packaging>
 	<name>Pyranid OpenTelemetry Integration</name>
 	<description>OpenTelemetry metrics integration for Pyranid.</description>
@@ -58,7 +58,7 @@
 		<hsqldb.version>2.7.4</hsqldb.version>
 		<maven.enforcer.plugin.version>3.7.0</maven.enforcer.plugin.version>
 		<japicmp.maven.plugin.version>0.26.5</japicmp.maven.plugin.version>
-		<japicmp.baseline.version>1.2.0</japicmp.baseline.version>
+		<japicmp.baseline.version>1.3.0</japicmp.baseline.version>
 	</properties>
 
 	<dependencyManagement>
