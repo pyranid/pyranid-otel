@@ -6,18 +6,20 @@ All notable changes to Pyranid's OpenTelemetry Integration will be documented in
 
 ### Added
 
-- Added notification-session open duration, total duration, and active-session metrics for Pyranid 4.6.0 notification listeners.
+- Added notification-session open duration, total duration, and active-session metrics for Pyranid notification listeners.
 - Added delivered notification-batch size and terminal notification-connection loss metrics.
 - Added bounded notification open and terminal outcome attributes. Failure metrics include `error.type`; channel names, payloads, session identifiers, and backend process identifiers are never exported.
 
 ### Fixed
 
+- Binary and source JARs include the project's Apache 2.0 `LICENSE` file.
 - Ensured active-transaction metrics and internal state are drained at logical transaction exit if a physical terminal callback is absent or cannot finish.
 
 ### Changed
 
-- Pyranid `4.6.0` is now required. Because Pyranid remains a `provided` dependency, applications must upgrade both artifacts together.
-- Updated the provided Pyranid dependency to `4.6.0`.
+- Pyranid `4.8.0` is now required. Because Pyranid remains a `provided` dependency, applications must upgrade both artifacts together.
+- Updated the provided Pyranid dependency and verification baseline to `4.8.0`; database construction
+  examples and tests use `Database.with(dataSource, databaseType)`.
 - Updated the OpenTelemetry Java BOM to `1.67.0`.
 - Configured namespace and pool names are included on notification metrics when present. Notification sends continue through the ordinary statement metrics.
 

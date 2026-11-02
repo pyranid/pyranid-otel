@@ -96,8 +96,8 @@ public class OpenTelemetryMetricsCollectorTests {
 		Assertions.assertEquals("oracle.db", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.ORACLE));
 		Assertions.assertEquals("other_sql", OpenTelemetryMetricsCollector.dbSystemName(DatabaseType.GENERIC));
 
-		// The adapter's declared core floor is 4.6.0. New enum values in a candidate core must exercise
-		// the documented fallback, not force a raised minimum or a change in exported metric attributes.
+		// The adapter targets core 4.8.0. Unmapped enum values retain the documented fallback
+		// so adding a database product does not require changing exported metric attributes.
 		java.util.Set<DatabaseType> explicitlyMapped = java.util.EnumSet.of(DatabaseType.POSTGRESQL,
 				DatabaseType.MYSQL, DatabaseType.MARIA_DB, DatabaseType.SQLITE, DatabaseType.SQL_SERVER, DatabaseType.ORACLE);
 		for (DatabaseType databaseType : DatabaseType.values()) {
@@ -319,13 +319,13 @@ public class OpenTelemetryMetricsCollectorTests {
 	}
 
 	@Test
-	public void failedStatementConnectionAcquireWithNoPoolNameDoesNotTriggerDatabaseTypeDetection() {
+	public void failedStatementConnectionAcquireWithNoPoolNameDoesNotBorrowAnotherConnection() {
 		TestHarness harness = TestHarness.create();
 		OpenTelemetryMetricsCollector collector = OpenTelemetryMetricsCollector
 				.withMeter(harness.openTelemetrySdk().getMeter("test-failed-acquire-no-pool"))
 				.build();
 		CountingFailingDataSource dataSource = new CountingFailingDataSource();
-		Database database = Database.withDataSource(dataSource)
+		Database database = Database.with(dataSource, DatabaseType.GENERIC)
 				.metricsCollector(collector)
 				.build();
 
@@ -341,8 +341,7 @@ public class OpenTelemetryMetricsCollectorTests {
 				.poolName("primary")
 				.build();
 		CountingFailingDataSource dataSource = new CountingFailingDataSource();
-		Database database = Database.withDataSource(dataSource)
-				.databaseType(DatabaseType.POSTGRESQL)
+		Database database = Database.with(dataSource, DatabaseType.POSTGRESQL)
 				.metricsCollector(collector)
 				.build();
 
@@ -455,8 +454,7 @@ public class OpenTelemetryMetricsCollectorTests {
 				.withMeter(harness.openTelemetrySdk().getMeter("test-commit-failure"))
 				.build();
 		AtomicInteger rollbacks = new AtomicInteger();
-		Database database = Database.withDataSource(commitFailingDataSource("otel_commit_failure", rollbacks))
-				.databaseType(DatabaseType.POSTGRESQL)
+		Database database = Database.with(commitFailingDataSource("otel_commit_failure", rollbacks), DatabaseType.POSTGRESQL)
 				.metricsCollector(collector)
 				.build();
 
@@ -485,8 +483,7 @@ public class OpenTelemetryMetricsCollectorTests {
 				.withMeter(harness.openTelemetrySdk().getMeter("test-begin-failure-active"))
 				.build();
 		AtomicInteger rollbacks = new AtomicInteger();
-		Database database = Database.withDataSource(beginFailingDataSource("otel_begin_failure_active", rollbacks))
-				.databaseType(DatabaseType.POSTGRESQL)
+		Database database = Database.with(beginFailingDataSource("otel_begin_failure_active", rollbacks), DatabaseType.POSTGRESQL)
 				.metricsCollector(collector)
 				.build();
 
@@ -740,8 +737,7 @@ public class OpenTelemetryMetricsCollectorTests {
 	@NonNull
 	private static Database database(@NonNull String name,
 																	 @NonNull OpenTelemetryMetricsCollector collector) {
-		return Database.withDataSource(createInMemoryDataSource(name))
-				.databaseType(DatabaseType.POSTGRESQL)
+		return Database.with(createInMemoryDataSource(name), DatabaseType.POSTGRESQL)
 				.metricsCollector(collector)
 				.build();
 	}

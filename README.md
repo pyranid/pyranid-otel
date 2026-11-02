@@ -15,6 +15,8 @@ an implementation of Pyranid's
 </dependency>
 ```
 
+Pyranid `4.8.0` is required. Core is a `provided` dependency, so applications must include a compatible core artifact explicitly.
+
 ## Configuration
 
 Create a collector with
@@ -31,8 +33,7 @@ OpenTelemetryMetricsCollector metricsCollector = OpenTelemetryMetricsCollector
   .recordCollectionName(false)
   .build();
 
-Database database = Database.withDataSource(dataSource)
-  .databaseType(DatabaseType.POSTGRESQL)
+Database database = Database.with(dataSource, DatabaseType.POSTGRESQL)
   .metricsCollector(metricsCollector)
   .build();
 ```
@@ -96,7 +97,7 @@ All five notification metrics include `db.system.name`. They also include the co
 
 ## Attribute Notes
 
-`db.system.name` is mapped from Pyranid's configured or detected [`DatabaseType`](https://javadoc.pyranid.com/com/pyranid/DatabaseType.html):
+`db.system.name` is mapped from Pyranid's configured [`DatabaseType`](https://javadoc.pyranid.com/com/pyranid/DatabaseType.html):
 
 | Pyranid `DatabaseType` | `db.system.name` |
 | --- | --- |
@@ -128,16 +129,15 @@ This adapter does not emit [`Statement::getId()`](https://javadoc.pyranid.com/co
 
 `pyranid.transaction.active` increments when a physical JDBC transaction begins and decrements once at the terminal physical transaction outcome. Commit failure is not terminal by itself because Pyranid attempts rollback afterward; the rollback callback owns the single decrement. Physical-begin failures do not decrement unless the transaction was first recorded as active.
 
-### Testing against the 4.8.0 core candidate
+### Testing with Pyranid 4.8.0
 
-The adapter still declares Pyranid 4.6.0 as its minimum. After installing core `4.8.0-SNAPSHOT` locally,
-run `mvn -Pcore-candidate verify` to test the same adapter against the candidate. Also run the default
-`mvn verify` to retain coverage of the minimum supported core. No new core API is required by the adapter.
+After installing core `4.8.0` locally, run `mvn verify` from the `pyranid-otel/` project directory.
+The adapter and its tests use the required `Database.with(dataSource, databaseType)` construction API.
 
 `db.client.operation.duration` continues to use `StatementLog.getTotalDuration()`, the sum of active
 connection acquisition, preparation, execution, and mapping phases. Core 4.8.0's optional
 `getElapsedDuration()` is a separate diagnostic and does not redefine that metric.
 
-Database types added after the adapter's core baseline retain the documented `other_sql` fallback. In this
-adapter version that includes DuckDB from newer core releases. Candidate verification explicitly checks that
-fallback; adding a dedicated DuckDB attribute value is a separate adapter change.
+Unmapped database types retain the documented `other_sql` fallback. In this adapter version that includes
+DuckDB. Verification explicitly checks that fallback; adding a dedicated DuckDB attribute value is a
+separate adapter change.
