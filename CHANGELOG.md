@@ -7,6 +7,7 @@ All notable changes to Pyranid's OpenTelemetry Integration will be documented in
 ### Fixed
 
 - Binary and source JARs include the project's Apache 2.0 `LICENSE` file.
+- Generated Javadoc links core Pyranid and dependency types to their external API documentation.
 
 ### Changed
 

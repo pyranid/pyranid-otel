@@ -245,6 +245,12 @@
 						<additionalOption>-XDignore.symbol.file</additionalOption>
 					</additionalOptions>
 					<linksource>true</linksource>
+					<links>
+						<link>https://javadoc.pyranid.com/</link>
+						<link>https://javadoc.io/static/io.opentelemetry/opentelemetry-api/${opentelemetry.version}/</link>
+						<link>https://javadoc.io/static/org.jspecify/jspecify/1.0.1/</link>
+						<link>https://javadoc.io/static/com.google.code.findbugs/jsr305/3.0.2/</link>
+					</links>
 					<show>public</show>
 					<bottom><![CDATA[Copyright 2026 <a href="https://www.revetware.com" target="_blank">Revetware LLC</a>.]]></bottom>
 					<source>17</source>
